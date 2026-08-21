@@ -1,0 +1,974 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>linmon — Linux 安全监控</title>
+<script src="/data/echarts.min.js"></script>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:'Segoe UI',system-ui,-apple-system,sans-serif;background:#0d1117;color:#c9d1d9;font-size:14px}
+.header{background:#161b22;padding:12px 24px;display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid #30363d}
+.header h1{font-size:18px;color:#58a6ff}
+.header .info{font-size:12px;color:#8b949e}
+.nav{display:flex;gap:4px;background:#161b22;padding:0 24px;border-bottom:1px solid #30363d}
+.nav button{background:none;border:none;color:#8b949e;padding:10px 20px;cursor:pointer;font-size:14px;border-bottom:2px solid transparent}
+.nav button.active{color:#58a6ff;border-bottom-color:#58a6ff}
+.nav button:hover{color:#c9d1d9}
+.container{padding:16px 24px;max-width:1600px;margin:0 auto}
+.cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:12px;margin-bottom:16px}
+.card{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:12px 16px}
+.card .label{font-size:11px;color:#8b949e;text-transform:uppercase;margin-bottom:4px}
+.card .value{font-size:22px;font-weight:600;color:#58a6ff}
+.card .sub{font-size:11px;color:#8b949e;margin-top:2px}
+.card.danger .value{color:#f85149}
+.card.warning .value{color:#d29922}
+.card.success .value{color:#3fb950}
+.toolbar{display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;gap:8px;flex-wrap:wrap}
+.toolbar .left{display:flex;gap:8px;align-items:center}
+.toolbar .right{display:flex;gap:8px;align-items:center}
+.btn{background:#21262d;border:1px solid #30363d;color:#c9d1d9;padding:6px 14px;border-radius:6px;cursor:pointer;font-size:13px}
+.btn:hover{background:#30363d}
+.btn.primary{background:#1f6feb;border-color:#1f6feb;color:#fff}
+.btn.primary:hover{background:#388bfd}
+.btn.danger{background:#da3633;border-color:#da3633;color:#fff}
+.btn:disabled{opacity:0.5;cursor:not-allowed}
+.btn.kill{background:#21262d;border-color:#da3633;color:#f85149}
+.btn.kill:hover{background:#da3633;color:#fff}
+.toast{position:fixed;bottom:30px;left:50%;transform:translateX(-50%);background:#238636;color:#fff;padding:10px 24px;border-radius:8px;font-size:13px;z-index:9999;box-shadow:0 4px 12px rgba(0,0,0,0.4);opacity:0;transition:opacity 0.3s;pointer-events:none}
+.toast.show{opacity:1}
+table{width:100%;border-collapse:collapse;font-size:13px}
+th{background:#161b22;color:#8b949e;text-align:left;padding:8px 10px;border-bottom:1px solid #30363d;position:sticky;top:0;font-weight:500;font-size:12px;text-transform:uppercase;white-space:nowrap;user-select:none}
+th.sortable{cursor:pointer}
+th.sortable:hover{color:#58a6ff}
+th.sort-arrow::after{content:'\25B2';font-size:10px;margin-left:4px;color:#58a6ff}
+th.sort-arrow.desc::after{content:'\25BC';font-size:10px;margin-left:4px;color:#58a6ff}
+td{padding:7px 10px;border-bottom:1px solid #21262d;color:#c9d1d9}
+tr:hover td{background:#161b22}
+.badge{display:inline-block;padding:2px 8px;border-radius:10px;font-size:11px;font-weight:500}
+.badge.high{background:#f8514922;color:#f85149}
+.badge.medium{background:#d2992222;color:#d29922}
+.badge.low{background:#3fb95022;color:#3fb950}
+.badge.system{background:#58a6ff22;color:#58a6ff}
+.badge.network{background:#bc8cff22;color:#bc8cff}
+.badge.database{background:#f0883e22;color:#f0883e}
+.badge.suspicious{background:#f8514922;color:#f85149}
+.badge.malware{background:#f8514944;color:#f85149}
+.scroll{overflow-x:auto;max-height:600px;overflow-y:auto;border:1px solid #30363d;border-radius:8px}
+.panel{display:none}
+.panel.active{display:block}
+.loading{text-align:center;padding:40px;color:#8b949e}
+.detail-row{display:none;background:#0d1117}
+.detail-row td{padding:12px 16px;color:#8b949e}
+.detail-row .grid{display:grid;grid-template-columns:1fr 1fr;gap:4px 24px}
+.detail-row .grid div{padding:2px 0}
+.detail-row .grid .k{color:#8b949e;display:inline-block;width:100px}
+.detail-row .grid .v{color:#c9d1d9}
+.modal-overlay{display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.7);z-index:1000;justify-content:center;align-items:center}
+.modal-overlay.show{display:flex}
+.modal{background:#161b22;border:1px solid #30363d;border-radius:12px;padding:24px;max-width:700px;width:90%;max-height:80vh;overflow-y:auto}
+.modal h2{font-size:18px;color:#58a6ff;margin-bottom:16px}
+.modal .close{float:right;cursor:pointer;color:#8b949e;font-size:20px}
+.modal .close:hover{color:#c9d1d9}
+.modal .ai-result{background:#0d1117;border:1px solid #30363d;border-radius:8px;padding:16px;font-size:13px;line-height:1.6;color:#c9d1d9;max-height:500px;overflow-y:auto}
+/* Markdown 渲染样式 */
+.ai-result h1{font-size:18px;color:#58a6ff;margin:16px 0 8px;padding-bottom:6px;border-bottom:1px solid #30363d}
+.ai-result h2{font-size:16px;color:#58a6ff;margin:14px 0 6px;padding-bottom:4px;border-bottom:1px solid #21262d}
+.ai-result h3{font-size:14px;color:#79c0ff;margin:12px 0 4px}
+.ai-result h4{font-size:13px;color:#79c0ff;margin:10px 0 4px}
+.ai-result p{margin:6px 0}
+.ai-result ul,.ai-result ol{margin:6px 0;padding-left:24px}
+.ai-result li{margin:3px 0}
+.ai-result strong{color:#f0883e;font-weight:600}
+.ai-result em{color:#d29922;font-style:italic}
+.ai-result code{background:#21262d;padding:1px 5px;border-radius:4px;font-family:'SFMono-Regular',Consolas,monospace;font-size:12px;color:#f85149}
+.ai-result pre{background:#161b22;border:1px solid #30363d;border-radius:6px;padding:10px;overflow-x:auto;margin:8px 0}
+.ai-result pre code{background:none;padding:0;color:#c9d1d9}
+.ai-result blockquote{border-left:3px solid #58a6ff;padding-left:12px;margin:8px 0;color:#8b949e}
+.ai-result table{width:100%;border-collapse:collapse;margin:8px 0;font-size:12px}
+.ai-result th{background:#21262d;color:#8b949e;text-align:left;padding:6px 10px;border:1px solid #30363d;font-weight:600}
+.ai-result td{padding:6px 10px;border:1px solid #21262d;color:#c9d1d9}
+.ai-result tr:nth-child(even) td{background:#0d1117}
+.ai-result hr{border:none;border-top:1px solid #30363d;margin:12px 0}
+.modal .ai-error{color:#f85149}
+.modal .loading{text-align:center;padding:40px}
+.config-form{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.config-form .full{grid-column:1/-1}
+.config-form label{font-size:12px;color:#8b949e;display:block;margin-bottom:4px}
+.config-form input{width:100%;background:#0d1117;border:1px solid #30363d;color:#c9d1d9;padding:8px;border-radius:6px;font-size:13px}
+.config-form input:focus{outline:none;border-color:#58a6ff}
+.switch{display:inline-flex;align-items:center;gap:8px}
+.switch input[type=checkbox]{width:40px;height:20px;appearance:none;background:#30363d;border-radius:10px;position:relative;cursor:pointer}
+.switch input[type=checkbox]:checked{background:#3fb950}
+.switch input[type=checkbox]::before{content:'';position:absolute;width:16px;height:16px;border-radius:50%;background:#fff;top:2px;left:2px;transition:0.2s}
+.switch input[type=checkbox]:checked::before{left:22px}
+.trace-result{margin-top:12px}
+.trace-hop{display:flex;align-items:center;gap:12px;padding:6px 0;border-bottom:1px solid #21262d}
+.trace-hop .num{width:30px;color:#8b949e;text-align:right}
+.trace-hop .ip{width:180px;color:#58a6ff;font-family:monospace}
+.trace-hop .geo{color:#8b949e;flex:1}
+.trace-hop .rtt{color:#3fb950;width:80px;text-align:right}
+select,input[type=text],input[type=number]{background:#0d1117;border:1px solid #30363d;color:#c9d1d9;padding:6px 10px;border-radius:6px;font-size:13px}
+select:focus,input:focus{outline:none;border-color:#58a6ff}
+.auto-refresh{display:flex;align-items:center;gap:6px;font-size:12px;color:#8b949e}
+.auto-refresh select{padding:4px 8px}
+.risk-bar{display:flex;gap:2px;height:6px;border-radius:3px;overflow:hidden;margin-top:4px}
+.risk-bar div{height:100%}
+.risk-bar .h{background:#f85149}
+.risk-bar .m{background:#d29922}
+.risk-bar .l{background:#3fb950}
+.net-map-section{margin-bottom:16px;border:1px solid #30363d;border-radius:8px;overflow:hidden}
+.net-map-section .map-header{background:#161b22;padding:10px 16px;display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid #30363d}
+.net-map-section .map-header h3{font-size:13px;color:#58a6ff}
+.net-map-section .map-header .legend{display:flex;gap:12px;font-size:11px;color:#8b949e}
+.net-map-section .map-header .legend span{display:flex;align-items:center;gap:4px}
+.net-map-section .map-header .legend .dot{width:8px;height:8px;border-radius:50%;display:inline-block}
+#net-map-chart{width:100%;height:480px;background:#0d1117}
+</style>
+</head>
+<body>
+<div class="header">
+  <h1>linmon — Linux 进程与网络安全监控</h1>
+  <div class="info" id="sysInfo">加载中...</div>
+</div>
+<div class="nav">
+  <button class="active" onclick="switchPanel('overview')" id="btn-overview">概览</button>
+  <button onclick="switchPanel('process')" id="btn-process">进程监控</button>
+  <button onclick="switchPanel('network')" id="btn-network">网络连接</button>
+  <button onclick="switchPanel('trace')" id="btn-trace">路由跟踪</button>
+  <button onclick="switchPanel('ai')" id="btn-ai">AI 分析</button>
+</div>
+<div class="container">
+
+<!-- 概览面板 -->
+<div class="panel active" id="panel-overview">
+  <div class="cards" id="overview-cards"></div>
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-top:16px">
+    <div>
+      <h3 style="color:#8b949e;font-size:13px;margin-bottom:8px">进程类别分布</h3>
+      <div class="scroll" id="proc-category-list" style="max-height:300px"></div>
+    </div>
+    <div>
+      <h3 style="color:#8b949e;font-size:13px;margin-bottom:8px">网络连接方向分布</h3>
+      <div class="scroll" id="net-direction-list" style="max-height:300px"></div>
+    </div>
+  </div>
+</div>
+
+<!-- 进程监控面板 -->
+<div class="panel" id="panel-process">
+  <div class="toolbar">
+    <div class="left">
+      <button class="btn primary" onclick="loadProcesses()">刷新</button>
+      <label class="switch" style="font-size:13px;color:#8b949e">
+        <input type="checkbox" id="proc-risky-only"> 仅看高危
+      </label>
+    </div>
+    <div class="right">
+      <div class="auto-refresh">
+        自动刷新:
+        <select id="proc-auto-refresh" onchange="toggleAutoRefresh('proc')">
+          <option value="0">关闭</option>
+          <option value="5">5秒</option>
+          <option value="10">10秒</option>
+          <option value="30">30秒</option>
+          <option value="60">60秒</option>
+        </select>
+      </div>
+    </div>
+  </div>
+  <div class="scroll" id="proc-table-container">
+    <div class="loading">点击"刷新"加载数据...</div>
+  </div>
+</div>
+
+<!-- 网络连接面板 -->
+<div class="panel" id="panel-network">
+  <div class="toolbar">
+    <div class="left">
+      <button class="btn primary" onclick="loadConnections()">刷新</button>
+      <label class="switch" style="font-size:13px;color:#8b949e">
+        <input type="checkbox" id="net-public-only"> 仅看公网
+      </label>
+      <label class="switch" style="font-size:13px;color:#8b949e">
+        <input type="checkbox" id="net-risky-only"> 仅看可疑
+      </label>
+    </div>
+    <div class="right">
+      <div class="auto-refresh">
+        自动刷新:
+        <select id="net-auto-refresh" onchange="toggleAutoRefresh('net')">
+          <option value="0">关闭</option>
+          <option value="5">5秒</option>
+          <option value="10">10秒</option>
+          <option value="30">30秒</option>
+          <option value="60">60秒</option>
+        </select>
+      </div>
+    </div>
+  </div>
+  <!-- 地理位置地图 -->
+  <div class="net-map-section">
+    <div class="map-header">
+      <h3>网络连接地理分布</h3>
+      <div class="legend">
+        <span><span class="dot" style="background:#f85149"></span>高危</span>
+        <span><span class="dot" style="background:#d29922"></span>中危</span>
+        <span><span class="dot" style="background:#3fb950"></span>低危</span>
+      </div>
+    </div>
+    <div id="net-map-chart"></div>
+  </div>
+  <div class="scroll" id="net-table-container">
+    <div class="loading">点击"刷新"加载数据...</div>
+  </div>
+</div>
+
+<!-- 路由跟踪面板 -->
+<div class="panel" id="panel-trace">
+  <div class="toolbar">
+    <div class="left">
+      目标: <input type="text" id="trace-target" placeholder="IP或域名" style="width:200px" value="8.8.8.8">
+      跳数: <input type="number" id="trace-hops" value="30" style="width:60px">
+      <button class="btn primary" onclick="runTraceroute()">跟踪</button>
+    </div>
+  </div>
+  <div class="trace-result" id="trace-result"></div>
+</div>
+
+<!-- AI分析面板 -->
+<div class="panel" id="panel-ai">
+  <div class="cards">
+    <div class="card">
+      <div class="label">AI 状态</div>
+      <div class="value" id="ai-status" style="font-size:16px">未知</div>
+    </div>
+    <div class="card">
+      <div class="label">模型</div>
+      <div class="value" id="ai-model" style="font-size:16px">—</div>
+    </div>
+    <div class="card">
+      <div class="label">高危进程</div>
+      <div class="value" id="ai-risky-procs" style="font-size:16px">—</div>
+    </div>
+    <div class="card">
+      <div class="label">可疑连接</div>
+      <div class="value" id="ai-risky-conns" style="font-size:16px">—</div>
+    </div>
+  </div>
+  <div class="toolbar">
+    <div class="left">
+      <button class="btn primary" onclick="aiAnalyze('overview')">生成综合安全报告</button>
+      <button class="btn" onclick="showAIConfig()">AI 配置</button>
+      <button class="btn" onclick="aiTest()">测试连接</button>
+    </div>
+  </div>
+<div id="ai-result-container" style="margin-top:12px">
+    <div class="loading">点击"生成综合安全报告"开始AI分析...</div>
+  </div>
+
+</div>
+
+<!-- AI分析结果弹窗 -->
+<div class="modal-overlay" id="ai-modal">
+  <div class="modal" style="max-width:900px">
+    <span class="close" onclick="closeModal()">&times;</span>
+    <h2 id="ai-modal-title">AI 分析</h2>
+    <div id="ai-modal-body">
+      <div class="loading">正在分析中...</div>
+    </div>
+  </div>
+  </div>
+</div>
+
+</div>
+
+<!-- AI分析结果弹窗 -->
+<div class="modal-overlay" id="ai-modal">
+  <div class="modal" style="max-width:900px">
+    <span class="close" onclick="closeModal()">&times;</span>
+    <h2 id="ai-modal-title">AI 分析</h2>
+    <div id="ai-modal-body">
+      <div class="loading">正在分析中...</div>
+    </div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+const API = '';
+let refreshTimers = {proc: null, net: null};
+
+// ====== 排序状态管理 ======
+let procSort = {key: null, order: 'asc'};
+let netSort = {key: null, order: 'asc'};
+let _lastProcData = null;
+let _lastConnData = null;
+
+// 进程表列定义: 表头显示名 → 对应数据字段
+const PROC_COLUMNS = [
+  {label:'PID', key:'pid', type:'number'},
+  {label:'进程名', key:'name', type:'string'},
+  {label:'用户', key:'username', type:'string'},
+  {label:'启动时间', key:'start_time', type:'string'},
+  {label:'运行时长', key:'uptime', type:'number'},
+  {label:'内存', key:'memory_rss', type:'number'},
+  {label:'说明', key:'description', type:'string'},
+  {label:'网络', key:'net_conns_str', type:'string'},
+  {label:'定时', key:'has_schedule', type:'number'},
+  {label:'风险', key:'risk_level', type:'risk'},
+];
+
+// 网络连接表列定义
+const NET_COLUMNS = [
+  {label:'协议', key:'protocol', type:'string'},
+  {label:'状态', key:'state', type:'string'},
+  {label:'方向', key:'direction', type:'string'},
+  {label:'本地地址', key:'local_port', type:'number'},
+  {label:'远程地址', key:'remote_port', type:'number'},
+  {label:'数据类型', key:'data_type', type:'string'},
+  {label:'归属地', key:'geo', type:'geo'},
+  {label:'对端OS', key:'remote_os', type:'string'},
+  {label:'进程', key:'process', type:'string'},
+  {label:'时长', key:'age_seconds', type:'number'},
+  {label:'发送', key:'bytes_sent', type:'number'},
+  {label:'接收', key:'bytes_recv', type:'number'},
+  {label:'频率', key:'frequency_desc', type:'string'},
+  {label:'风险', key:'risk_level', type:'risk'},
+];
+
+function _getSortValue(item, col) {
+  const v = item[col.key];
+  if (col.type === 'risk') {
+    const order = {high:0, medium:1, low:2};
+    return order[v] ?? 3;
+  }
+  if (col.type === 'geo') {
+    return (v && v.geo_str) ? v.geo_str : '';
+  }
+  if (col.type === 'number') {
+    return (v === null || v === undefined) ? -Infinity : Number(v) || 0;
+  }
+  return (v === null || v === undefined) ? '' : String(v);
+}
+
+function _sortData(data, sort, columns) {
+  if (!sort.key) return data;
+  const col = columns.find(c => c.key === sort.key);
+  if (!col) return data;
+  const dir = sort.order === 'desc' ? -1 : 1;
+  return [...data].sort((a, b) => {
+    const va = _getSortValue(a, col);
+    const vb = _getSortValue(b, col);
+    if (va < vb) return -1 * dir;
+    if (va > vb) return 1 * dir;
+    return 0;
+  });
+}
+
+function _handleSortClick(sortObj, columns, containerId, renderFn) {
+  return function(key) {
+    if (sortObj.key === key) {
+      sortObj.order = sortObj.order === 'asc' ? 'desc' : 'asc';
+    } else {
+      sortObj.key = key;
+      sortObj.order = 'asc';
+    }
+    // 更新表头箭头
+    document.querySelectorAll('#' + containerId + ' th.sortable').forEach(th => {
+      th.classList.remove('sort-arrow', 'desc');
+    });
+    const th = document.querySelector('#' + containerId + ` th[data-key="${key}"]`);
+    if (th) {
+      th.classList.add('sort-arrow');
+      if (sortObj.order === 'desc') th.classList.add('desc');
+    }
+    renderFn();
+  };
+}
+
+// ====== Markdown 渲染器 ======
+function renderMarkdown(md) {
+  if (!md) return '';
+  // 1. 转义 HTML
+  let html = md.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+
+  // 2. 提取代码块（防止内部内容被其他规则处理）
+  const codeBlocks = [];
+  html = html.replace(/```([\s\S]*?)```/g, (m, code) => {
+    const idx = codeBlocks.length;
+    codeBlocks.push('<pre><code>' + code.replace(/^\n/,'') + '</code></pre>');
+    return '\u0000CODE' + idx + '\u0000';
+  });
+
+  // 3. 表格处理（支持 | col1 | col2 | 格式）
+  const lines = html.split('\n');
+  const outLines = [];
+  let i = 0;
+  while (i < lines.length) {
+    const line = lines[i];
+    // 检测表格: 当前行和下一行都含 |，且下一行是分隔线
+    if (line.includes('|') && i + 1 < lines.length && /^\s*\|?[\s:|-]+\|?\s*$/.test(lines[i+1]) && lines[i+1].includes('-')) {
+      // 解析表头
+      const headers = line.split('|').map(s=>s.trim()).filter(s=>s!=='' || true);
+      // 去掉首尾空管道
+      let hdrs = line.split('|').map(s=>s.trim());
+      if (hdrs[0]==='') hdrs.shift();
+      if (hdrs[hdrs.length-1]==='') hdrs.pop();
+      i += 2; // 跳过分隔线
+      const rows = [];
+      while (i < lines.length && lines[i].includes('|')) {
+        let cells = lines[i].split('|').map(s=>s.trim());
+        if (cells[0]==='') cells.shift();
+        if (cells[cells.length-1]==='') cells.pop();
+        rows.push(cells);
+        i++;
+      }
+      let table = '<table><thead><tr>' + hdrs.map(h=>'<th>'+h+'</th>').join('') + '</tr></thead><tbody>';
+      rows.forEach(r => { table += '<tr>' + r.map(c=>'<td>'+c+'</td>').join('') + '</tr>'; });
+      table += '</tbody></table>';
+      outLines.push(table);
+      continue;
+    }
+    outLines.push(line);
+    i++;
+  }
+  html = outLines.join('\n');
+
+  // 4. 行内代码
+  html = html.replace(/`([^`\n]+)`/g, '<code>$1</code>');
+
+  // 5. 粗体/斜体
+  html = html.replace(/\*\*\*([^*]+)\*\*\*/g, '<strong><em>$1</em></strong>');
+  html = html.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+  html = html.replace(/(?<!\*)\*([^*\n]+)\*(?!\*)/g, '<em>$1</em>');
+
+  // 6. 标题（必须在行首）
+  html = html.replace(/^####\s+(.+)$/gm, '<h4>$1</h4>');
+  html = html.replace(/^###\s+(.+)$/gm, '<h3>$1</h3>');
+  html = html.replace(/^##\s+(.+)$/gm, '<h2>$1</h2>');
+  html = html.replace(/^#\s+(.+)$/gm, '<h1>$1</h1>');
+
+  // 7. 分割线
+  html = html.replace(/^---+$/gm, '<hr>');
+
+  // 8. 引用块
+  html = html.replace(/^&gt;\s+(.+)$/gm, '<blockquote>$1</blockquote>');
+
+  // 9. 无序列表
+  html = html.replace(/^(\s*)[-*]\s+(.+)$/gm, '$1<li>$2</li>');
+  html = html.replace(/(<li>[\s\S]*?<\/li>)(?:\n(?=\s*<li>))?/g, m => '<ul>' + m + '</ul>');
+
+  // 10. 有序列表
+  html = html.replace(/^(\s*)\d+\.\s+(.+)$/gm, '$1<li>$2</li>');
+  // (有序列表的 ul 包裹已在无序列表步骤处理，合并即可)
+
+  // 11. 段落处理：连续非标签文本行用 <p> 包裹
+  html = html.split('\n').map(line => {
+    if (line.trim() === '') return '';
+    if (/^<(h[1-4]|ul|ol|li|pre|blockquote|table|hr|div)/.test(line.trim())) return line;
+    if (/^\u0000CODE/.test(line)) return line;
+    return '<p>' + line + '</p>';
+  }).join('\n');
+
+  // 12. 还原代码块
+  html = html.replace(/\u0000CODE(\d+)\u0000/g, (m, idx) => codeBlocks[parseInt(idx)] || '');
+
+  // 13. 清理多余空行
+  html = html.replace(/\n{3,}/g, '\n\n');
+
+  return html;
+}
+
+function switchPanel(name) {
+  document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
+  document.querySelectorAll('.nav button').forEach(b => b.classList.remove('active'));
+  document.getElementById('panel-' + name).classList.add('active');
+  document.getElementById('btn-' + name).classList.add('active');
+  if (name === 'overview') loadOverview();
+  if (name === 'ai') loadAIStatus();
+}
+
+// ====== 概览 ======
+async function loadOverview() {
+  try {
+    const res = await fetch(API + '/api/overview');
+    const data = await res.json();
+    const s = data.system, ps = data.proc_summary, ns = data.net_summary;
+    document.getElementById('sysInfo').textContent = `${s.distro.name} | 开机: ${s.boot_time_str} | 运行: ${s.uptime}`;
+
+    const cards = [
+      {label:'进程总数', value:ps.total_processes, sub:`高危 ${ps.risky_count}`, cls: ps.risky_count>0?'danger':'success'},
+      {label:'有网络连接', value:ps.has_network, sub:'个进程', cls:''},
+      {label:'有定时配置', value:ps.has_schedule, sub:'个进程', cls:''},
+      {label:'监听端口', value:ps.listening_ports_count, sub: ps.listening_ports? ps.listening_ports.join(', ').substring(0,40):'', cls:''},
+      {label:'网络连接总数', value:ns.total_connections, sub:`公网 ${ns.public_ip_count}个`, cls:''},
+      {label:'涉及国家', value:ns.country_count, sub:'个', cls:''},
+      {label:'高危连接', value:(ns.by_risk.high||0), sub:'个', cls:(ns.by_risk.high||0)>0?'danger':'success'},
+      {label:'中危连接', value:(ns.by_risk.medium||0), sub:'个', cls:(ns.by_risk.medium||0)>0?'warning':'success'},
+    ];
+    document.getElementById('overview-cards').innerHTML = cards.map(c =>
+      `<div class="card ${c.cls}"><div class="label">${c.label}</div><div class="value">${c.value}</div><div class="sub">${c.sub||''}</div></div>`
+    ).join('');
+
+    // 进程类别
+    const cats = Object.entries(ps.by_category||{}).sort((a,b)=>b[1]-a[1]);
+    document.getElementById('proc-category-list').innerHTML =
+      '<table><tbody>' + cats.map(([k,v])=>`<tr><td><span class="badge ${k}">${k}</span></td><td style="text-align:right">${v}</td></tr>`).join('') + '</tbody></table>';
+
+    // 网络方向
+    const dirs = Object.entries(ns.by_direction||{}).sort((a,b)=>b[1]-a[1]);
+    const dirLabels = {outbound:'传出',inbound:'传入',listen:'监听',unknown:'未知'};
+    document.getElementById('net-direction-list').innerHTML =
+      '<table><tbody>' + dirs.map(([k,v])=>`<tr><td>${dirLabels[k]||k}</td><td style="text-align:right">${v}</td></tr>`).join('') + '</tbody></table>';
+  } catch(e) { console.error(e); }
+}
+
+// ====== 进程 ======
+async function loadProcesses() {
+  const container = document.getElementById('proc-table-container');
+  container.innerHTML = '<div class="loading">正在采集进程数据...</div>';
+  try {
+    let url = API + '/api/processes?refresh=1';
+    if (document.getElementById('proc-risky-only').checked) url += '&risky=1';
+    const res = await fetch(url);
+    const data = await res.json();
+    _lastProcData = data.processes;
+    renderProcessTable(_lastProcData);
+  } catch(e) { container.innerHTML = '<div class="loading">加载失败: '+e+'</div>'; }
+}
+
+function renderProcessTable(procs) {
+  const container = document.getElementById('proc-table-container');
+  if (!procs || !procs.length) { container.innerHTML = '<div class="loading">没有符合条件的进程</div>'; return; }
+  // 排序后的数据
+  const sorted = _sortData(procs, procSort, PROC_COLUMNS);
+  // 表头
+  const thHtml = PROC_COLUMNS.map((c, i) =>
+    `<th class="sortable" data-key="${c.key}" onclick="sortByProc('${c.key}')">${c.label}</th>`
+  ).join('') + '<th>操作</th>';
+  let html = '<table><thead><tr>' + thHtml + '</tr></thead><tbody>';
+  sorted.forEach(p => {
+    const riskBadge = p.risk_level==='high'?'<span class="badge high">高危</span>':
+                      p.risk_level==='medium'?'<span class="badge medium">中危</span>':
+                      '<span class="badge low">正常</span>';
+    const hasSchedule = (p.is_cron||p.is_systemd_timer||p.is_rc_local||p.is_initd)?1:0;
+    html += `<tr style="cursor:pointer" onclick="toggleDetail('proc-${p.pid}')">
+      <td>${p.pid}</td>
+      <td><span class="badge ${p.category}">${p.name}</span></td>
+      <td>${p.username}</td>
+      <td>${p.start_time}</td>
+      <td>${p.uptime_str}</td>
+      <td>${p.memory_rss_str}</td>
+      <td style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${p.description}">${p.description}</td>
+      <td style="font-size:11px;color:#8b949e">${(p.net_conns_str||'').substring(0,30)}</td>
+      <td style="font-size:11px">${hasSchedule?'<span class="badge medium">有</span>':'-'}</td>
+      <td>${riskBadge}</td>
+      <td><button class="btn" style="padding:2px 8px;font-size:11px" onclick="event.stopPropagation();aiAnalyze('process',${p.pid})">AI</button><button class="btn kill" style="padding:2px 8px;font-size:11px;margin-left:4px" onclick="event.stopPropagation();copyKillCmd(${p.pid},'${(p.name||'').replace(/'/g,"\\'")}')" title="复制kill命令">kill</button></td>
+    </tr>`;
+    // 详情行
+    html += `<tr class="detail-row" id="proc-${p.pid}"><td colspan="11"><div class="grid">
+      <div><span class="k">父进程:</span><span class="v">${p.parent_name}(PPID:${p.ppid})</span></div>
+      <div><span class="k">可执行文件:</span><span class="v">${p.exe||'不可读'}</span></div>
+      <div><span class="k">命令行:</span><span class="v">${p.cmdline||'无'}</span></div>
+      <div><span class="k">启动延迟:</span><span class="v">${p.boot_delay_str}</span></div>
+      <div><span class="k">CPU:</span><span class="v">${p.cpu_percent}%</span></div>
+      <div><span class="k">状态:</span><span class="v">${p.status}</span></div>
+      <div><span class="k">祖先链:</span><span class="v">${p.ancestors_str}</span></div>
+      <div><span class="k">子进程:</span><span class="v">${p.children_str}</span></div>
+      <div><span class="k">定时配置:</span><span class="v">${p.schedule_str}</span></div>
+      <div><span class="k">使用端口:</span><span class="v">${p.net_ports_str}</span></div>
+      <div><span class="k">网络连接:</span><span class="v">${p.net_conns_str}</span></div>
+      <div><span class="k">风险原因:</span><span class="v">${p.risk_reasons_str||'无'}</span></div>
+    </div></td></tr>`;
+  });
+  html += '</tbody></table>';
+  container.innerHTML = html;
+  // 恢复排序箭头
+  if (procSort.key) {
+    const th = container.querySelector(`th[data-key="${procSort.key}"]`);
+    if (th) { th.classList.add('sort-arrow'); if (procSort.order==='desc') th.classList.add('desc'); }
+  }
+}
+
+function sortByProc(key) {
+  if (procSort.key === key) { procSort.order = procSort.order === 'asc' ? 'desc' : 'asc'; }
+  else { procSort.key = key; procSort.order = 'asc'; }
+  if (_lastProcData) renderProcessTable(_lastProcData);
+}
+
+function toggleDetail(id) {
+  const el = document.getElementById(id);
+  if (el) el.style.display = el.style.display === 'none' ? '' : 'none';
+}
+
+// ====== 网络连接 ======
+async function loadConnections() {
+  const container = document.getElementById('net-table-container');
+  container.innerHTML = '<div class="loading">正在采集网络连接数据...</div>';
+  try {
+    let url = API + '/api/connections?refresh=1';
+    if (document.getElementById('net-public-only').checked) url += '&public=1';
+    if (document.getElementById('net-risky-only').checked) url += '&risky=1';
+    const res = await fetch(url);
+    const data = await res.json();
+    _lastConnData = data.connections;
+    renderConnectionTable(_lastConnData);
+    renderNetMap(_lastConnData);
+  } catch(e) { container.innerHTML = '<div class="loading">加载失败: '+e+'</div>'; }
+}
+
+function renderConnectionTable(conns) {
+  const container = document.getElementById('net-table-container');
+  if (!conns || !conns.length) { container.innerHTML = '<div class="loading">没有符合条件的连接</div>'; return; }
+  const sorted = _sortData(conns, netSort, NET_COLUMNS);
+  const thHtml = NET_COLUMNS.map(c =>
+    `<th class="sortable" data-key="${c.key}" onclick="sortByNet('${c.key}')">${c.label}</th>`
+  ).join('') + '<th>操作</th>';
+  let html = '<table><thead><tr>' + thHtml + '</tr></thead><tbody>';
+  sorted.forEach(c => {
+    const riskBadge = c.risk_level==='high'?'<span class="badge high">高危</span>':
+                      c.risk_level==='medium'?'<span class="badge medium">中危</span>':
+                      '<span class="badge low">正常</span>';
+    html += `<tr style="cursor:pointer" onclick="toggleDetail('conn-${c.remote_ip}-${c.remote_port}')">
+      <td>${c.protocol}</td>
+      <td style="font-size:11px">${c.state}</td>
+      <td><span class="badge ${c.direction==='outbound'?'suspicious':c.direction==='inbound'?'medium':'low'}">${c.direction}</span></td>
+      <td style="font-family:monospace;font-size:12px">${c.local_ip}:${c.local_port}</td>
+      <td style="font-family:monospace;font-size:12px;color:#58a6ff">${c.remote_ip}:${c.remote_port}</td>
+      <td>${c.data_type}</td>
+      <td>${c.geo.geo_str}</td>
+      <td style="font-size:11px;color:#8b949e;max-width:150px;overflow:hidden;text-overflow:ellipsis" title="${c.remote_os}">${c.remote_os}</td>
+      <td><span class="badge ${c.process?'network':''}">${c.process||'?'}</span></td>
+      <td>${c.age_str}</td>
+      <td style="font-size:11px">${c.bytes_sent_str}</td>
+      <td style="font-size:11px">${c.bytes_recv_str}</td>
+      <td style="font-size:11px;color:#8b949e;max-width:120px;overflow:hidden;text-overflow:ellipsis" title="${c.frequency_desc}">${c.frequency_desc||'—'}</td>
+      <td>${riskBadge}</td>
+      <td><button class="btn" style="padding:2px 8px;font-size:11px" onclick="event.stopPropagation();aiAnalyze('connection','${c.remote_ip}',${c.remote_port})">AI</button></td>
+    </tr>`;
+    // 详情
+    html += `<tr class="detail-row" id="conn-${c.remote_ip}-${c.remote_port}"><td colspan="15"><div class="grid">
+      <div><span class="k">进程PID:</span><span class="v">${c.pid}</span></div>
+      <div><span class="k">进程用户:</span><span class="v">${c.process_user}</span></div>
+      <div><span class="k">命令行:</span><span class="v">${c.process_cmdline||'无'}</span></div>
+      <div><span class="k">定时器:</span><span class="v">${c.timer_info||'无'}</span></div>
+      <div><span class="k">经纬度:</span><span class="v">${c.geo.lng||'—'}, ${c.geo.lat||'—'}</span></div>
+      <div><span class="k">风险原因:</span><span class="v">${c.risk_reasons_str||'无'}</span></div>
+      <div><span class="k">首次发现:</span><span class="v">${c.frequency?.first_seen||'—'}</span></div>
+      <div><span class="k">最后发现:</span><span class="v">${c.frequency?.last_seen||'—'}</span></div>
+    </div></td></tr>`;
+  });
+  html += '</tbody></table>';
+  container.innerHTML = html;
+  // 恢复排序箭头
+  if (netSort.key) {
+    const th = container.querySelector(`th[data-key="${netSort.key}"]`);
+    if (th) { th.classList.add('sort-arrow'); if (netSort.order==='desc') th.classList.add('desc'); }
+  }
+}
+
+function sortByNet(key) {
+  if (netSort.key === key) { netSort.order = netSort.order === 'asc' ? 'desc' : 'asc'; }
+  else { netSort.key = key; netSort.order = 'asc'; }
+  if (_lastConnData) renderConnectionTable(_lastConnData);
+}
+
+// ====== 网络连接地理地图 ======
+let _netMapChart = null;
+let _worldJsonLoaded = false;
+
+function renderNetMap(conns) {
+  const chartDom = document.getElementById('net-map-chart');
+  if (!chartDom) return;
+
+  // 收集有坐标的公网连接
+  const points = [];
+  const seenCoords = {};
+  (conns || []).forEach(c => {
+    const lng = c.geo && c.geo.lng;
+    const lat = c.geo && c.geo.lat;
+    if (lng && lat) {
+      const key = lng + ',' + lat;
+      if (!seenCoords[key]) {
+        seenCoords[key] = true;
+        const color = c.risk_level==='high' ? '#f85149' : c.risk_level==='medium' ? '#d29922' : '#3fb950';
+        points.push({
+          name: `${c.remote_ip}:${c.remote_port} | ${c.geo.geo_str} | ${c.process||'?'}`,
+          value: [lng, lat, 1],
+          itemStyle: { color: color }
+        });
+      } else {
+        // 同坐标的点累加
+        const existing = points.find(p => p.value[0]===lng && p.value[1]===lat);
+        if (existing) existing.value[2]++;
+      }
+    }
+  });
+
+  if (!_netMapChart) {
+    _netMapChart = echarts.init(chartDom);
+    window.addEventListener('resize', () => { if (_netMapChart) _netMapChart.resize(); });
+  }
+
+  if (!_worldJsonLoaded) {
+    // 异步加载世界地图JSON
+    fetch('/data/world.json').then(r => r.json()).then(worldJson => {
+      echarts.registerMap('world', worldJson);
+      _worldJsonLoaded = true;
+      _drawNetMap(points);
+    }).catch(e => {
+      console.error('加载world.json失败:', e);
+      _netMapChart.setOption({
+        title: { text: '地图加载失败', left:'center', top:'center', textStyle:{color:'#8b949e',fontSize:14} }
+      });
+    });
+  } else {
+    _drawNetMap(points);
+  }
+}
+
+function _drawNetMap(points) {
+  const option = {
+    backgroundColor: '#0d1117',
+    tooltip: {
+      trigger: 'item',
+      formatter: function(p) {
+        if (p.data && p.data.name) return p.data.name;
+        return p.name;
+      },
+      backgroundColor: '#161b22',
+      borderColor: '#30363d',
+      textStyle: { color: '#c9d1d9', fontSize: 12 }
+    },
+    geo: {
+      map: 'world',
+      roam: true,
+      silent: false,
+      itemStyle: { areaColor: '#161b22', borderColor: '#30363d' },
+      emphasis: { itemStyle: { areaColor: '#21262d' }, label: { show: false } },
+      scaleLimit: { min: 1, max: 10 }
+    },
+    series: [{
+      name: '网络连接',
+      type: 'scatter',
+      coordinateSystem: 'geo',
+      data: points,
+      symbolSize: function(val) {
+        return Math.min(8 + val[2] * 2, 25);
+      },
+      label: { show: false },
+      emphasis: {
+        scale: 1.5,
+        label: {
+          show: true,
+          formatter: function(p) { return p.data.name; },
+          position: 'top',
+          color: '#58a6ff',
+          fontSize: 11,
+          backgroundColor: '#161b22',
+          borderColor: '#30363d',
+          borderWidth: 1,
+          padding: [4, 8],
+          borderRadius: 4
+        }
+      }
+    }]
+  };
+  _netMapChart.setOption(option, true);
+}
+
+// ====== 路由跟踪 ======
+async function runTraceroute() {
+  const target = document.getElementById('trace-target').value.trim();
+  if (!target) return;
+  const hops = document.getElementById('trace-hops').value || 30;
+  const container = document.getElementById('trace-result');
+  container.innerHTML = '<div class="loading">正在执行路由跟踪...</div>';
+  try {
+    const res = await fetch(API + '/api/traceroute', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({target, hops:parseInt(hops)})
+    });
+    const data = await res.json();
+    if (data.error) { container.innerHTML = `<div class="loading" style="color:#f85149">${data.error}</div>`; return; }
+    let html = '<div style="background:#161b22;border:1px solid #30363d;border-radius:8px;padding:12px">';
+    html += `<div style="margin-bottom:8px;color:#58a6ff">目标: ${data.target} (${data.hops.length}跳)</div>`;
+    data.hops.forEach(h => {
+      const geo = h.geo ? h.geo.geo_str : '';
+      html += `<div class="trace-hop">
+        <span class="num">${h.hop}</span>
+        <span class="ip">${h.ip}</span>
+        <span class="geo">${geo}</span>
+        <span class="rtt">${h.rtt_ms ? h.rtt_ms.toFixed(1)+'ms' : '*'}</span>
+      </div>`;
+    });
+    html += '</div>';
+    container.innerHTML = html;
+  } catch(e) { container.innerHTML = '<div class="loading">跟踪失败: '+e+'</div>'; }
+}
+
+// ====== AI 分析 ======
+async function loadAIStatus() {
+  try {
+    const res = await fetch(API + '/api/ai/config');
+    const cfg = await res.json();
+    document.getElementById('ai-status').textContent = cfg.enabled ? '已启用' : '未启用';
+    document.getElementById('ai-status').style.color = cfg.enabled ? '#3fb950' : '#f85149';
+    document.getElementById('ai-model').textContent = cfg.model_name || '—';
+
+    // 获取高危统计
+    const [procRes, connRes] = await Promise.all([
+      fetch(API+'/api/processes?risky=1').then(r=>r.json()),
+      fetch(API+'/api/connections?risky=1').then(r=>r.json())
+    ]);
+    document.getElementById('ai-risky-procs').textContent = procRes.count;
+    document.getElementById('ai-risky-conns').textContent = connRes.count;
+  } catch(e) { console.error(e); }
+}
+
+async function aiAnalyze(type, pid, remotePort) {
+  const isModal = type === 'process' || type === 'connection';
+  if (isModal) { openModal(); }
+  const body = isModal ? document.getElementById('ai-modal-body') : document.getElementById('ai-result-container');
+  body.innerHTML = '<div class="loading">正在等待AI分析 (可能需要数十秒)...</div>';
+  document.getElementById('ai-modal-title').textContent = type==='process'?`AI 进程分析` : type==='connection'?`AI 连接分析` : 'AI 综合安全报告';
+
+  try {
+    let payload = {type};
+    if (type === 'process') payload.pid = pid;
+    if (type === 'connection') { payload.remote_ip = pid; payload.remote_port = remotePort; }
+    const res = await fetch(API + '/api/ai/analyze', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify(payload)
+    });
+    const data = await res.json();
+    if (data.success) {
+      body.innerHTML = `<div class="ai-result">${renderMarkdown(data.analysis)}</div>` +
+        (isModal ? `<div style="margin-top:12px;text-align:right"><button class="btn" onclick="closeModal()">关闭</button></div>` : '');
+    } else {
+      body.innerHTML = `<div class="ai-error">${data.error || '分析失败'}</div>`;
+    }
+  } catch(e) {
+    body.innerHTML = `<div class="ai-error">请求失败: ${e}</div>`;
+  }
+}
+
+function showAIConfig() {
+  openModal();
+  document.getElementById('ai-modal-title').textContent = 'AI 配置';
+  fetch(API + '/api/ai/config').then(r=>r.json()).then(cfg => {
+    document.getElementById('ai-modal-body').innerHTML = `
+      <div class="config-form">
+        <div><label>端点地址 (endpoint)</label><input id="cfg-endpoint" value="${cfg.endpoint||''}"></div>
+        <div><label>TokenHub URL</label><input id="cfg-tokenhub" value="${cfg.tokenhub_url||''}"></div>
+        <div><label>模型名称 (model_name)</label><input id="cfg-model-name" value="${cfg.model_name||''}"></div>
+        <div><label>模型ID (model_id)</label><input id="cfg-model-id" value="${cfg.model_id||''}"></div>
+        <div><label>App ID</label><input id="cfg-app-id" value="${cfg.app_id||''}" placeholder="天翼云应用ID"></div>
+        <div><label>App Secret</label><input id="cfg-app-secret" type="password" value="${cfg.app_secret&&cfg.app_secret.startsWith('***')?'':cfg.app_secret||''}" placeholder="天翼云应用密钥"></div>
+        <div class="full">
+          <label class="switch"><input type="checkbox" id="cfg-enabled" ${cfg.enabled?'checked':''}> 启用AI分析</label>
+        </div>
+        <div class="full" style="display:flex;gap:8px;margin-top:8px">
+          <button class="btn primary" onclick="saveAIConfig()">保存配置</button>
+          <button class="btn" onclick="aiTest()">测试连接</button>
+          <button class="btn" onclick="closeModal()">关闭</button>
+        </div>
+      </div>`;
+  });
+}
+
+async function saveAIConfig() {
+  const cfg = {
+    endpoint: document.getElementById('cfg-endpoint').value,
+    tokenhub_url: document.getElementById('cfg-tokenhub').value,
+    model_name: document.getElementById('cfg-model-name').value,
+    model_id: document.getElementById('cfg-model-id').value,
+    app_id: document.getElementById('cfg-app-id').value,
+    app_secret: document.getElementById('cfg-app-secret').value,
+    enabled: document.getElementById('cfg-enabled').checked,
+  };
+  try {
+    const res = await fetch(API + '/api/ai/config', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify(cfg)
+    });
+    const data = await res.json();
+    if (data.success) { alert('配置已保存'); loadAIStatus(); }
+    else alert('保存失败: ' + (data.error||''));
+  } catch(e) { alert('保存失败: '+e); }
+}
+
+async function aiTest() {
+  const body = document.getElementById('ai-modal-body');
+  body.innerHTML += '<div class="loading" id="ai-test-loading">测试中...</div>';
+  try {
+    const res = await fetch(API + '/api/ai/test', {method:'POST'});
+    const data = await res.json();
+    const el = document.getElementById('ai-test-loading');
+    if (data.success) { el.innerHTML = `<span style="color:#3fb950">连接成功: ${data.analysis.substring(0,100)}</span>`; }
+    else { el.innerHTML = `<span style="color:#f85149">失败: ${data.error}</span>`; }
+  } catch(e) { document.getElementById('ai-test-loading').innerHTML = '<span style="color:#f85149">请求失败</span>'; }
+}
+
+function copyKillCmd(pid, name) {
+  const cmd = 'sudo kill -9 ' + pid;
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(cmd).then(function() {
+      showToast('已复制: ' + cmd);
+    }).catch(function() {
+      _fallbackCopy(cmd);
+    });
+  } else {
+    _fallbackCopy(cmd);
+  }
+}
+
+function _fallbackCopy(text) {
+  const ta = document.createElement('textarea');
+  ta.value = text;
+  ta.style.position = 'fixed';
+  ta.style.opacity = '0';
+  document.body.appendChild(ta);
+  ta.select();
+  try {
+    document.execCommand('copy');
+    showToast('已复制: ' + text);
+  } catch(e) {
+    showToast('复制失败，请手动复制: ' + text);
+  }
+  document.body.removeChild(ta);
+}
+
+function showToast(msg) {
+  const t = document.getElementById('toast');
+  if (!t) return;
+  t.textContent = msg;
+  t.classList.add('show');
+  clearTimeout(t._timer);
+  t._timer = setTimeout(function() { t.classList.remove('show'); }, 2500);
+}
+
+function openModal() { document.getElementById('ai-modal').classList.add('show'); }
+function closeModal() { document.getElementById('ai-modal').classList.remove('show'); }
+
+// ====== 自动刷新 ======
+function toggleAutoRefresh(type) {
+  const sel = document.getElementById(type + '-auto-refresh');
+  const interval = parseInt(sel.value);
+  if (refreshTimers[type]) { clearInterval(refreshTimers[type]); refreshTimers[type] = null; }
+  if (interval > 0) {
+    if (type === 'proc') loadProcesses(); else loadConnections();
+    refreshTimers[type] = setInterval(() => {
+      if (type === 'proc') loadProcesses(); else loadConnections();
+    }, interval * 1000);
+  }
+}
+
+// 初始化
+loadOverview();
+setInterval(loadOverview, 10000);
+</script>
+</body>
+</html>
