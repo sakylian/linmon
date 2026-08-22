@@ -3,13 +3,16 @@ AIGC:
   ContentProducer: '001191110102MAD55U9H0F10002'
   ContentPropagator: '001191110102MAD55U9H0F10002'
   Label: '1'
-  ProduceID: '8ecb034d-5c54-4ec8-b0ae-5072de1f6612'
-  PropagateID: '8ecb034d-5c54-4ec8-b0ae-5072de1f6612'
-  ReservedCode1: '1d6bc0cc-afa6-4ab9-9f7b-87d28c80123f'
-  ReservedCode2: '1d6bc0cc-afa6-4ab9-9f7b-87d28c80123f'
+  ProduceID: '33197141-8fd1-443c-b109-35cf19e82026'
+  PropagateID: '33197141-8fd1-443c-b109-35cf19e82026'
+  ReservedCode1: 'c0a75543-eafb-48f6-b327-fad18d2edbfc'
+  ReservedCode2: 'c0a75543-eafb-48f6-b327-fad18d2edbfc'
 ---
 
 # linmon — Linux 进程与网络连接安全监控工具
+
+初学Linux的朋友，看着满屏的ps信息或者ss网络连接，蒙了，咋看？怎么了解哪些进程可能存在问题？有时候真心想呼唤火绒杀毒软件里面的一个组成部分：火绒剑，来帮你披荆斩棘，看清系统里面究竟在运行什么。
+我用中国电信的星辰超级智能体（TeleAgent）制作了这个工具，希望能够帮到你。
 
 轻量级 Linux 安全监控工具，提供命令行和 Web 面板两种使用方式。实时采集系统进程、网络连接信息，结合本地规则引擎和可选的 AI 分析，帮助快速发现可疑进程、异常网络外连等安全隐患。
 
