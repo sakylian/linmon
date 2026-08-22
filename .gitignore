@@ -17,5 +17,7 @@ config/web_config.json
 .DS_Store
 Thumbs.db
 
-# 第三方授权数据（纯真IP库 qqwry.dat，需自行获取授权，勿随项目分发）
+# 第三方授权数据（IP/CDN 数据库，需自行获取授权，勿随项目分发）
 data/qqwry.dat
+data/ipv6wry.db
+data/cdn.yml

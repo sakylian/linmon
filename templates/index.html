@@ -91,6 +91,8 @@ tr:hover td{background:#161b22}
 .ai-result tr:nth-child(even) td{background:#0d1117}
 .ai-result hr{border:none;border-top:1px solid #30363d;margin:12px 0}
 .modal .ai-error{color:#f85149}
+.report-export-bar{margin-top:14px;padding-top:10px;border-top:1px dashed #30363d;font-size:13px;color:#8b949e}
+.report-export-bar .btn{margin-left:6px;padding:5px 12px;font-size:12px}
 .modal .loading{text-align:center;padding:40px}
 .config-form{display:grid;grid-template-columns:1fr 1fr;gap:12px}
 .config-form .full{grid-column:1/-1}
@@ -1410,13 +1412,53 @@ async function aiAnalyze(type, pid, remotePort) {
     });
     const data = await res.json();
     if (data.success) {
-      body.innerHTML = `<div class="ai-result">${renderMarkdown(data.analysis)}</div>` +
+      const title = type==='process' ? `AI 进程分析 (PID ${pid})`
+                  : type==='connection' ? `AI 连接分析 (${pid}:${remotePort})`
+                  : 'AI 综合安全报告';
+      const timestamp = data.timestamp || new Date().toISOString().slice(0,19).replace('T',' ');
+      const target = data.target || (type==='process' ? ('PID '+pid) : type==='connection' ? (pid+':'+remotePort) : '');
+      window._lastAiReport = {
+        analysis: data.analysis, title: title,
+        timestamp: timestamp, target_type: data.target_type || type,
+        target: target
+      };
+      const exportBar = `<div class="report-export-bar">导出报告: ` +
+        `<button class="btn" onclick="exportReport('md')">Markdown (.md)</button> ` +
+        `<button class="btn" onclick="exportReport('pdf')">PDF (.pdf)</button></div>`;
+      body.innerHTML = `<div class="ai-result">${renderMarkdown(data.analysis)}</div>` + exportBar +
         (isModal ? `<div style="margin-top:12px;text-align:right"><button class="btn" onclick="closeModal()">关闭</button></div>` : '');
     } else {
       body.innerHTML = `<div class="ai-error">${data.error || '分析失败'}</div>`;
     }
   } catch(e) {
     body.innerHTML = `<div class="ai-error">请求失败: ${e}</div>`;
+  }
+}
+
+async function exportReport(fmt) {
+  const rep = window._lastAiReport;
+  if (!rep || !rep.analysis) { alert('请先生成一份 AI 报告再导出'); return; }
+  try {
+    const res = await fetch(API + '/api/ai/export', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify(Object.assign({format: fmt}, rep))
+    });
+    if (!res.ok) {
+      const e = await res.json().catch(() => ({error: '导出失败'}));
+      alert('导出失败: ' + (e.error || res.status));
+      return;
+    }
+    const blob = await res.blob();
+    const cd = res.headers.get('Content-Disposition') || '';
+    let fn = 'ai_report.' + fmt;
+    const m = cd.match(/filename="?([^";]+)"?/);
+    if (m) fn = m[1];
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = fn; document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 2000);
+  } catch(e) {
+    alert('导出失败: ' + e);
   }
 }
 

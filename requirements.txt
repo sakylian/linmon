@@ -2,3 +2,9 @@
 # 升级前请在三环境充分验证，避免引入破坏性变更。
 psutil==5.9.8
 flask==3.0.3
+# CDN 域名库(cdn.yml)解析所需；IPv6 解压依赖 7z 命令行或 py7zr(二选一，非 pip 强制)
+PyYAML==6.0.1
+# AI 安全报告导出 PDF 所需(reportlab 内置 STSong-Light CID 字体，中文无需附带字体文件)
+reportlab==4.1.0
+# 可选：从 ip.7z 解压 ipv6wry.db 的纯 Python 回退(默认优先使用系统 7z 命令)
+# py7zr==0.20.8

@@ -331,6 +331,35 @@ def cmd_trace(args):
                 print(f'\n{r["analysis"]}')
 
 
+def cmd_update(args):
+    """更新 IP/地理/CDN 数据库 (参考 nali 的更新逻辑)"""
+    from modules.db_updater import update_databases, VALID_DB
+
+    db_list = None
+    if getattr(args, 'db', None):
+        db_list = [d.strip().lower() for d in args.db.split(',') if d.strip()]
+        invalid = [d for d in db_list if d not in VALID_DB]
+        if invalid:
+            print(f'无效的数据库: {", ".join(invalid)}')
+            print(f'可选: {", ".join(sorted(VALID_DB))}')
+            sys.exit(1)
+
+    print(f'\n{VERSION} — 数据库更新')
+    print('=' * 60)
+    if db_list:
+        print(f'仅更新: {", ".join(db_list)}')
+    else:
+        print(f'更新全部: {", ".join(sorted(VALID_DB))}')
+
+    ok = update_databases(db_list)
+    print('=' * 60)
+    if ok:
+        print('数据库更新完成。下次 geo 研判将使用新库。')
+    else:
+        print('部分数据库更新失败，请检查网络后重试。')
+        sys.exit(1)
+
+
 def cmd_web(args):
     """启动Web服务"""
     from webserver import start_server
@@ -432,6 +461,11 @@ def main():
     p_web.add_argument('--port', type=int, default=None, help='监听端口(默认读取 web_config.json，未配置则 8765)')
     p_web.add_argument('--debug', action='store_true', help='调试模式')
 
+    # update
+    p_update = subparsers.add_parser('update', help='更新 IP/地理/CDN 数据库')
+    p_update.add_argument('--db', default=None,
+                          help='仅更新指定数据库，逗号分隔: qqwry,cdn,zxipv6wry (默认全部)')
+
     # ai-config
     p_ai = subparsers.add_parser('ai-config', help='AI配置管理')
     p_ai.add_argument('--show', action='store_true', help='显示当前配置')
@@ -464,6 +498,7 @@ def main():
         'diag': cmd_diag,
         'trace': cmd_trace,
         'web': cmd_web,
+        'update': cmd_update,
         'ai-config': cmd_ai_config,
     }[args.command](args)
 

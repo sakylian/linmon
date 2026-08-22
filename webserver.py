@@ -18,7 +18,7 @@ import logging
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from flask import Flask, request, jsonify, render_template, send_from_directory
+from flask import Flask, request, jsonify, render_template, send_from_directory, Response
 
 from modules.proc_monitor import get_all_processes, get_system_boot_info, get_process_summary
 from modules.net_monitor import get_all_connections, get_network_summary, run_traceroute, capture_traffic, start_frequency_sampler, configure_geo_risk
@@ -393,6 +393,45 @@ def api_ai_test():
         return jsonify({'success': False, 'error': '外部AI分析已禁用(allow_external_ai=false)，不会向任何第三方发送数据。'}), 400
     result = analyzer._call_ai('请回复"连接成功"。')
     return jsonify(result)
+
+
+def _safe_filename(ts):
+    """把时间戳转为安全文件名片段"""
+    s = re.sub(r'[^\w\-]+', '_', ts or '')
+    return s[:40] or 'report'
+
+
+@app.route('/api/ai/export', methods=['POST'])
+def api_ai_export():
+    """导出 AI 安全分析报告为 Markdown 或 PDF"""
+    data = request.get_json() or {}
+    fmt = (data.get('format') or 'md').lower()
+    report = {
+        'title': data.get('title') or 'AI 安全分析报告',
+        'timestamp': data.get('timestamp') or time.strftime('%Y-%m-%d %H:%M:%S'),
+        'target_type': data.get('target_type') or 'overview',
+        'target': data.get('target') or '',
+        'analysis': data.get('analysis') or '',
+    }
+    fname = 'ai_report_%s' % _safe_filename(report['timestamp'])
+
+    if fmt == 'md':
+        from modules.report_exporter import export_markdown
+        content = export_markdown(report)
+        return Response(content, mimetype='text/markdown',
+                         headers={'Content-Disposition': 'attachment; filename="%s.md"' % fname})
+
+    if fmt == 'pdf':
+        from modules.report_exporter import export_pdf
+        try:
+            pdf_bytes = export_pdf(report)
+        except Exception as e:  # 例如 reportlab 未安装
+            logger.exception('PDF 导出失败')
+            return jsonify({'error': 'PDF 生成失败: %s' % e}), 500
+        return Response(pdf_bytes, mimetype='application/pdf',
+                        headers={'Content-Disposition': 'attachment; filename="%s.pdf"' % fname})
+
+    return jsonify({'error': '不支持的格式: %s (支持 md / pdf)' % fmt}), 400
 
 
 def start_server(host=None, port=None, debug=False):

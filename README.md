@@ -110,6 +110,7 @@ linmon <子命令> [选项]
 | `diag` | 系统全面诊断 | `--ai` AI分析 / `-o report.txt` / `--csv data.csv` / `--json data.json` |
 | `trace` | 路由跟踪 | `--hops 30` / `--timeout 5` / `--ai` |
 | `web` | 启动Web服务 | `--host 0.0.0.0` / `--port 8765` / `--debug` |
+| `update` | 更新 IP/地理/CDN 数据库 | `--db qqwry,cdn,zxipv6wry`（默认全部） |
 | `ai-config` | AI配置管理 | `--show` / `--set key=val` / `--enable` / `--disable` / `--test` |
 
 ### 使用示例
@@ -129,7 +130,27 @@ linmon diag --ai -o report.txt --csv data.csv
 
 # 路由跟踪到 Google DNS
 linmon trace 8.8.8.8 --ai
+
+# 更新全部 IP/地理/CDN 数据库（参考 nali 的获取逻辑）
+linmon update
+
+# 仅更新 CDN 厂商域名库
+linmon update --db cdn
 ```
+
+### 数据库更新（`linmon update`）
+
+IP 归属地与 CDN 研判依赖第三方数据库，可通过 `linmon update` 一键拉取最新数据（参考 [nali](https://github.com/zu1k/nali) 的更新逻辑）：
+
+| 数据库 | 内容 | 来源 | 保存位置 |
+|--------|------|------|----------|
+| `qqwry.dat` | IPv4 归属地（纯真 IP 库） | [metowolf/qqwry.dat](https://github.com/metowolf/qqwry.dat) | `data/qqwry.dat` |
+| `ipv6wry.db` | IPv6 归属地（ZX.IPv6） | [ip.zxinc.org](https://ip.zxinc.org/ip.7z)（解压 `ipv6wry.db`） | `data/ipv6wry.db` |
+| `cdn.yml` | CDN 厂商域名库 | [4ft35t/cdn](https://github.com/4ft35t/cdn)（含 jsdelivr/github 多级回退） | `data/cdn.yml` |
+
+- `linmon update` 默认更新全部；`--db` 可指定子集（`qqwry`、`cdn`、`zxipv6wry`）。
+- 更新后下次 geo 研判自动使用新库（Web 服务需重启以重新加载）。
+- IPv6 归属地查询使用 `/64` 前缀索引；CDN 判断基于**主机名后缀**匹配，自动应用于路由跟踪跳点（跳点主机名可见），并可在任何提供主机名的查询中生效。
 
 ## AI 分析配置
 
@@ -181,12 +202,12 @@ linmon 的 AI 分析需要把检测结果发往**第三方 LLM 端点**。为防
 
 IP 归属地查询依赖 **纯真 IP 库（`qqwry.dat`）**，该数据文件受纯真官方授权约束，**不得随本项目源码再分发**。因此：
 
-- 仓库已通过 `.gitignore` 排除 `data/qqwry.dat`，并且该文件**不再纳入版本控制**（仅本地保留）。
-- 部署脚本（`deploy.sh`）复制 `data/` 时会提示：`qqwry.dat` 如存在会被一并复制，但分发给他人前请确认已获得纯真 IP 库授权；若缺失则 IP 归属地功能不可用，不影响其它检测。
-- 使用者需**自行获取授权**后将 `qqwry.dat` 放置于以下任一位置即可生效：`data/qqwry.dat`、`/etc/linmon/qqwry.dat`、`/usr/local/share/qqwry.dat`、`~/qqwry.dat`。
-- 缺少该文件时，`geo_locator` 会优雅降级（归属地显示为"未知"），不会报错中断。
+- 仓库已通过 `.gitignore` 排除 `data/qqwry.dat`、`data/ipv6wry.db`、`data/cdn.yml`，这些文件**不再纳入版本控制**（仅本地保留）。
+- 部署脚本（`deploy.sh`）复制 `data/` 时会提示：第三方数据库如存在会被一并复制，但分发给他人前请确认已获得相应授权；若缺失则对应功能不可用，不影响其它检测。
+- 使用者需**自行获取授权**后将数据库放置于 `data/` 下（或 `linmon update` 一键拉取），缺失时 `geo_locator` 会优雅降级（归属地显示为"未知"），不会报错中断。
+- 数据来源与授权：IPv4 纯真 IP 库（CZ88.NET）、IPv6 ZX.IPV6（`ip.zxinc.org`）、CDN 域名库（[4ft35t/cdn](https://github.com/4ft35t/cdn)，MIT）。`linmon update` 仅获取并用于本地研判，不随仓库再分发原始数据文件。
 
-> 商业化发布前请务必确认：交付物中**不包含**未获授权的 `qqwry.dat`，否则可能产生数据授权合规风险。
+> 商业化发布前请务必确认：交付物中**不包含**未获授权的第三方数据库文件，否则可能产生数据授权合规风险。
 
 ## Web 面板
 
@@ -204,6 +225,7 @@ linmon-web
 - 网络连接页内置世界地图：本机→远端连线（粗细按流量），远端按风险等级散点标注
 - 每行进程支持 AI 分析和一键复制 kill 命令
 - 路由跟踪可视化展示
+- AI 安全分析报告可一键导出为 **Markdown (.md)** 或 **PDF (.pdf)** 文件（后端 `reportlab` 生成，中文用内置 CID 字体）
 
 ## 项目结构
 
@@ -217,7 +239,9 @@ linmon/
 ├── config/
 │   └── ai_config.json     # AI 配置（含密钥，已 gitignore）
 ├── data/
-│   ├── qqwry.dat          # 纯真 IP 归属地数据库（第三方授权数据，需自行获取，不随仓库分发）
+│   ├── qqwry.dat          # IPv4 纯真 IP 归属地数据库（第三方授权数据，linmon update 拉取）
+│   ├── ipv6wry.db         # IPv6 ZX.IPV6 归属地数据库（linmon update 拉取）
+│   ├── cdn.yml            # CDN 厂商域名库（linmon update 拉取）
 │   ├── echarts.min.js     # ECharts 图表库（地图）
 │   └── world.json         # 世界地图 GeoJSON
 ├── templates/
@@ -227,6 +251,7 @@ linmon/
     ├── net_monitor.py     # 网络连接监控模块
     ├── geo_locator.py     # IP 归属地查询 + 坐标映射
     ├── ai_analyzer.py     # AI 安全分析模块
+    ├── report_exporter.py # AI 报告导出 (Markdown / PDF)
     ├── distro_helper.py   # 发行版适配模块
     └── sys_diag.py        # 系统诊断报告生成
 ```

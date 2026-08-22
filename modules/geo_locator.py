@@ -199,10 +199,13 @@ class QqwryReader:
             self._loaded = False
 
 
+DATA_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'data'))
+
+
 def find_qqwry_dat():
     """搜索 qqwry.dat 文件"""
     search_paths = [
-        os.path.join(os.path.dirname(__file__), '..', 'data', 'qqwry.dat'),
+        os.path.join(DATA_DIR, 'qqwry.dat'),
         os.path.join(os.path.dirname(__file__), '..', 'qqwry.dat'),
         os.path.expanduser('~/qqwry.dat'),
         '/usr/share/qqwry/qqwry.dat',
@@ -214,6 +217,229 @@ def find_qqwry_dat():
         if os.path.isfile(ap):
             return ap
     return None
+
+
+def find_ipv6_db():
+    """搜索 IPv6 地址库 ipv6wry.db 文件"""
+    search_paths = [
+        os.path.join(DATA_DIR, 'ipv6wry.db'),
+        os.path.join(os.path.dirname(__file__), '..', 'ipv6wry.db'),
+        os.path.expanduser('~/ipv6wry.db'),
+        '/usr/share/linmon/ipv6wry.db',
+        '/etc/linmon/ipv6wry.db',
+    ]
+    for p in search_paths:
+        ap = os.path.abspath(p)
+        if os.path.isfile(ap):
+            return ap
+    return None
+
+
+def find_cdn_yaml():
+    """搜索 CDN 厂商域名库 cdn.yml 文件"""
+    search_paths = [
+        os.path.join(DATA_DIR, 'cdn.yml'),
+        os.path.join(os.path.dirname(__file__), '..', 'cdn.yml'),
+        os.path.expanduser('~/cdn.yml'),
+        '/usr/share/linmon/cdn.yml',
+        '/etc/linmon/cdn.yml',
+    ]
+    for p in search_paths:
+        ap = os.path.abspath(p)
+        if os.path.isfile(ap):
+            return ap
+    return None
+
+
+class Zxipv6wryReader:
+    """ZX.IPv6 数据库读取器 (ip.zxinc.org, 格式见 ip.7z 内《格式详解-ipdb.txt》)
+
+    文件头(小端序):
+      0~3   "IPDB" 魔数
+      4     minor 版本
+      5     major 版本
+      6     offset 长度 (offlen)
+      7     IP 长度 (iplen, IPv6 仅用前 8 字节 = /64 前缀)
+      8~15  int64 记录数
+      16~23 int64 索引区首条偏移
+    索引项 = IP[iplen] + offset[offlen] 字节；字符串为 UTF-8、以 \\0 结尾，
+    支持 0x01/0x02 重定向(与 qqwry 类似)。
+    """
+
+    def __init__(self, db_path):
+        self.path = db_path
+        self._img = None
+        self._loaded = False
+        self._first_index = 0
+        self._index_count = 0
+        self._offlen = 3
+        self._iplen = 8
+
+    def _get_long8(self, offset, size=8):
+        s = self._img[offset:offset + size]
+        if len(s) < 8:
+            s = s + b'\x00' * (8 - len(s))
+        return struct.unpack_from('<Q', s)[0]
+
+    def load(self):
+        try:
+            with open(self.path, 'rb') as f:
+                self._img = f.read()
+        except (FileNotFoundError, PermissionError) as e:
+            raise FileNotFoundError(f'无法加载 IPv6 数据库: {self.path} ({e})')
+        if self._img[:4] != b'IPDB':
+            raise ValueError(f'IPv6 数据库格式错误(缺少 IPDB 魔数): {self.path}')
+        self._offlen = self._img[6]
+        self._iplen = self._img[7]
+        self._index_count = self._get_long8(8)
+        self._first_index = self._get_long8(16)
+        self._loaded = True
+
+    def _get_string(self, offset):
+        if offset < 0 or offset >= len(self._img):
+            return ''
+        end = self._img.find(b'\x00', offset)
+        if end == -1:
+            end = len(self._img)
+        raw = self._img[offset:end]
+        try:
+            return raw.decode('utf-8')
+        except UnicodeDecodeError:
+            return raw.decode('gb18030', errors='replace')
+
+    def _get_area(self, offset):
+        if offset < 0 or offset >= len(self._img):
+            return ''
+        byte = self._img[offset]
+        if byte in (1, 2):
+            p = self._get_long8(offset + 1, self._offlen)
+            return self._get_area(p)
+        return self._get_string(offset)
+
+    def _get_addr(self, offset):
+        img = self._img
+        if offset < 0 or offset >= len(img):
+            return '', ''
+        byte = img[offset]
+        if byte == 1:
+            return self._get_addr(self._get_long8(offset + 1, self._offlen))
+        country = self._get_area(offset)
+        if byte == 2:
+            o = offset + 1 + self._offlen
+        else:
+            n = img.find(b'\x00', offset)
+            o = n + 1 if n != -1 else offset + 1
+        area = self._get_area(o)
+        return country, area
+
+    def _find(self, ip_prefix, lo, hi):
+        if hi - lo <= 1:
+            return lo
+        mid = (lo + hi) // 2
+        o = self._first_index + mid * (self._iplen + self._offlen)
+        mid_ip = self._get_long8(o, self._iplen)
+        if ip_prefix < mid_ip:
+            return self._find(ip_prefix, lo, mid)
+        return self._find(ip_prefix, mid, hi)
+
+    def lookup(self, ip_str):
+        """查询 IPv6 归属地，返回 (country, area)"""
+        if not self._loaded:
+            return '', ''
+        try:
+            ip_obj = ipaddress.ip_address(ip_str)
+        except (ValueError, TypeError):
+            return '', ''
+        if ip_obj.version != 6:
+            return '', ''
+        # 仅取高 64 位 (/64 前缀) 作为索引键
+        ip_prefix = (int(ip_obj) >> 64) & 0xFFFFFFFFFFFFFFFF
+        if self._index_count == 0:
+            return '', ''
+        i = self._find(ip_prefix, 0, self._index_count)
+        ip_off = self._first_index + i * (self._iplen + self._offlen)
+        rec_off = self._get_long8(ip_off + self._iplen, self._offlen)
+        return self._get_addr(rec_off)
+
+    def close(self):
+        self._img = None
+        self._loaded = False
+
+
+class CdnMatcher:
+    """CDN 厂商域名匹配器 (cdn.yml: domain -> {name, link})，按域名后缀最长匹配。"""
+
+    def __init__(self):
+        self._data = {}
+        self._loaded = False
+        self._path = None
+
+    def load(self, path=None):
+        path = path or find_cdn_yaml()
+        if not path or not os.path.isfile(path):
+            self._loaded = False
+            return False
+        self._path = path
+        try:
+            import yaml
+            with open(path, 'r', encoding='utf-8') as f:
+                data = yaml.safe_load(f) or {}
+        except Exception:
+            self._loaded = False
+            return False
+        self._data = {str(k).lower(): v for k, v in data.items() if k}
+        self._loaded = True
+        return True
+
+    def lookup(self, hostname):
+        """根据主机名判断所属 CDN 厂商，返回 {provider, link, matched} 或 None"""
+        if not self._loaded or not hostname:
+            return None
+        h = hostname.lower().strip().rstrip('.')
+        best = None
+        for domain in self._data:
+            if h == domain or h.endswith('.' + domain):
+                if best is None or len(domain) > len(best):
+                    best = domain
+        if best is None:
+            return None
+        info = self._data[best]
+        if isinstance(info, dict):
+            name = info.get('name') or best
+            link = info.get('link') or ''
+        else:
+            name, link = info, ''
+        return {'provider': name, 'link': link, 'matched': best}
+
+    def close(self):
+        self._data = {}
+        self._loaded = False
+
+
+_cdn_matcher = None
+
+
+def cdn_lookup(hostname):
+    """模块级 CDN 查询 (单例)；传入主机名返回 CDN 厂商信息或 None。"""
+    global _cdn_matcher
+    if _cdn_matcher is None:
+        _cdn_matcher = CdnMatcher()
+        _cdn_matcher.load()
+    return _cdn_matcher.lookup(hostname)
+
+
+def _reverse_dns(ip_str, timeout=0.5):
+    """反向 DNS 解析主机名，失败返回空串。"""
+    try:
+        import socket
+        old = socket.getdefaulttimeout()
+        socket.setdefaulttimeout(timeout)
+        try:
+            return socket.gethostbyaddr(ip_str)[0]
+        finally:
+            socket.setdefaulttimeout(old)
+    except Exception:
+        return ''
 
 
 def resolve_coordinates(geo_str):
@@ -249,16 +475,19 @@ def resolve_coordinates(geo_str):
 
 
 class GeoLocator:
-    """统一的IP归属地查询器"""
+    """统一的IP归属地查询器（IPv4/IPv6 + CDN 判断）"""
 
     _instance = None
-    _reader = None
+    _reader = None          # IPv4 (QqwryReader)
+    _reader6 = None         # IPv6 (Zxipv6wryReader)
     _qqwry_path = None
+    _ipv6_path = None
 
     @classmethod
-    def get_instance(cls, qqwry_path=None):
+    def get_instance(cls, qqwry_path=None, ipv6_path=None):
         if cls._instance is None:
             cls._instance = cls()
+        # IPv4 库
         if qqwry_path and qqwry_path != cls._qqwry_path:
             if cls._reader:
                 cls._reader.close()
@@ -272,18 +501,56 @@ class GeoLocator:
                 cls._qqwry_path = path
             except FileNotFoundError:
                 cls._reader = None
+        # IPv6 库
+        if ipv6_path and ipv6_path != cls._ipv6_path:
+            if cls._reader6:
+                cls._reader6.close()
+            cls._reader6 = None
+            cls._ipv6_path = ipv6_path
+        if cls._reader6 is None and (ipv6_path or find_ipv6_db()):
+            path = ipv6_path or find_ipv6_db()
+            try:
+                cls._reader6 = Zxipv6wryReader(path)
+                cls._reader6.load()
+                cls._ipv6_path = path
+            except (FileNotFoundError, ValueError):
+                cls._reader6 = None
         return cls._instance
 
     @classmethod
-    def lookup_ip(cls, ip_str):
-        """查询IP归属地，返回 dict: country, area, coords, geo_str"""
+    def lookup_ip(cls, ip_str, hostname=None, resolve_hostname=False):
+        """查询IP归属地，返回 dict: country, area, coords, geo_str, cdn
+
+        - hostname: 已知主机名时直接用于 CDN 判断（推荐，零额外开销）
+        - resolve_hostname: 为 True 且无 hostname 时，对公网 IP 做一次反向 DNS
+          （仅按需/少量使用，连接列表等批量场景请勿开启以免阻塞）
+        """
         instance = cls.get_instance()
         country, area = '', ''
-        if instance._reader:
-            country, area = instance._reader.lookup(ip_str)
+        try:
+            ip_obj = ipaddress.ip_address(ip_str)
+            is_v6 = (ip_obj.version == 6)
+        except (ValueError, TypeError):
+            is_v6 = False
+
+        if is_v6:
+            if instance._reader6:
+                country, area = instance._reader6.lookup(ip_str)
+        else:
+            if instance._reader:
+                country, area = instance._reader.lookup(ip_str)
+
         geo_str = f'{country} {area}'.strip() if (country or area) else '未知'
         lng, lat = resolve_coordinates(geo_str)
-        return {
+
+        # CDN 判断：优先使用已知主机名，否则按需反向 DNS
+        cdn = None
+        if hostname is None and resolve_hostname and is_valid_public_ip(ip_str):
+            hostname = _reverse_dns(ip_str)
+        if hostname:
+            cdn = cdn_lookup(hostname)
+
+        result = {
             'ip': ip_str,
             'country': country,
             'area': area,
@@ -291,12 +558,18 @@ class GeoLocator:
             'lng': lng,
             'lat': lat,
         }
+        if cdn:
+            result['cdn'] = cdn
+        return result
 
     @classmethod
     def close(cls):
         if cls._reader:
             cls._reader.close()
             cls._reader = None
+        if cls._reader6:
+            cls._reader6.close()
+            cls._reader6 = None
 
 
 # 端口→协议映射表
