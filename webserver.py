@@ -10,7 +10,9 @@ import os
 import sys
 import json
 import time
+import re
 import secrets
+import subprocess
 import threading
 import logging
 
@@ -20,7 +22,7 @@ from flask import Flask, request, jsonify, render_template, send_from_directory
 
 from modules.proc_monitor import get_all_processes, get_system_boot_info, get_process_summary
 from modules.net_monitor import get_all_connections, get_network_summary, run_traceroute, start_frequency_sampler, configure_geo_risk
-from modules.geo_locator import find_qqwry_dat, GeoLocator
+from modules.geo_locator import find_qqwry_dat, GeoLocator, is_valid_public_ip
 from modules.distro_helper import get_distro
 from modules.ai_analyzer import get_analyzer
 from modules.audit import log_event
@@ -40,6 +42,7 @@ DEFAULT_WEB_CONFIG = {
     'port': 8765,
     'auth_enabled': True,     # 默认开启令牌鉴权
     'auth_token': '',         # 为空时启动时自动生成并写回
+    'home_coord': [104.0, 35.0],  # 本机(连线源点)坐标 [经度, 纬度]，可改为服务器实际所在地
 }
 
 
@@ -73,6 +76,31 @@ def _save_web_config(cfg):
 
 # 全局 web 配置（启动后填充）
 _web_cfg = None
+
+# 本机(连线源点)坐标缓存：优先用配置的 home_coord，否则尝试本地探测出口公网IP并查本地 geo
+_HOME_COORD_CACHE = None
+
+
+def _get_home_coordinate(cfg):
+    """确定本机(地图连线源点)坐标。
+
+    策略：
+      1. 优先使用配置 home_coord；
+      2. 若本机存在出口公网IP，则用本地 GeoLocator 查询其坐标（纯本地查询，不外发任何数据）；
+      3. 探测失败则回退到配置值。
+    """
+    configured = cfg.get('home_coord') or [104.0, 35.0]
+    try:
+        out = subprocess.run(['ip', 'route', 'get', '1.1.1.1'],
+                             capture_output=True, text=True, timeout=3)
+        m = re.search(r'src\s+(\d{1,3}(?:\.\d{1,3}){3})', out.stdout)
+        if m and is_valid_public_ip(m.group(1)):
+            g = GeoLocator.lookup_ip(m.group(1))
+            if g.get('lng') is not None and g.get('lat') is not None:
+                return [g['lng'], g['lat']], g.get('geo_str') or '本机'
+    except Exception:
+        logger.debug('探测本机出口IP坐标失败，回退到配置坐标', exc_info=True)
+    return configured, '本机'
 
 
 def _current_token():
@@ -202,11 +230,18 @@ def api_connections():
     if risky_only:
         connections = [c for c in connections if c['risk_level'] in ('high', 'medium')]
 
+    global _HOME_COORD_CACHE
+    if _HOME_COORD_CACHE is None:
+        _HOME_COORD_CACHE = _get_home_coordinate(_web_cfg or DEFAULT_WEB_CONFIG)
+    home_coord, home_geo_str = _HOME_COORD_CACHE
+
     return jsonify({
         'summary': summary,
         'connections': connections,
         'count': len(connections),
         'timestamp': _cached_data['timestamp'],
+        'home_coord': home_coord,
+        'home_geo_str': home_geo_str,
     })
 
 

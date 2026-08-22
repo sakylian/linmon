@@ -127,6 +127,41 @@ select:focus,input:focus{outline:none;border-color:#58a6ff}
 .map-controls{position:absolute;top:12px;right:12px;display:flex;flex-direction:column;gap:6px;z-index:100}
 .map-controls .map-btn{width:36px;height:36px;background:#161b22;border:1px solid #30363d;border-radius:6px;color:#c9d1d9;cursor:pointer;font-size:16px;display:flex;align-items:center;justify-content:center;padding:0}
 .map-controls .map-btn:hover{background:#30363d;border-color:#58a6ff;color:#58a6ff}
+.net-map-section .map-header .right{display:flex;gap:14px;align-items:center}
+.map-toggle-btn{display:inline-flex;align-items:center;gap:4px}
+.net-map-collapsed #net-map-chart{display:none}
+.net-map-collapsed .map-controls{display:none}
+.reopen-bar{display:none;padding:14px 16px;background:#161b22;color:#8b949e;font-size:13px;align-items:center;gap:12px}
+.net-map-collapsed .reopen-bar{display:flex}
+/* 连接分析弹窗 */
+.modal-overlay{position:fixed;inset:0;background:rgba(0,0,0,0.6);z-index:9000;display:none;align-items:flex-start;justify-content:center;padding:40px 16px;overflow-y:auto}
+.modal-overlay.show{display:flex}
+.conn-modal{width:100%;max-width:780px;background:#161b22;border:1px solid #30363d;border-radius:10px;overflow:hidden;box-shadow:0 12px 40px rgba(0,0,0,0.6)}
+.conn-modal .modal-head{display:flex;justify-content:space-between;align-items:center;padding:14px 18px;border-bottom:1px solid #30363d;background:#0d1117}
+.conn-modal .modal-head h3{font-size:15px;color:#58a6ff}
+.conn-modal .modal-head .x{cursor:pointer;color:#8b949e;font-size:22px;line-height:1;background:none;border:none;padding:0}
+.conn-modal .modal-head .x:hover{color:#f85149}
+.conn-modal .modal-body{padding:16px 18px;max-height:72vh;overflow-y:auto}
+.analysis-summary{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:10px;margin-bottom:14px}
+.analysis-summary .as-card{background:#0d1117;border:1px solid #30363d;border-radius:8px;padding:10px 12px}
+.analysis-summary .as-card .l{font-size:11px;color:#8b949e;text-transform:uppercase}
+.analysis-summary .as-card .v{font-size:18px;font-weight:600;color:#c9d1d9;margin-top:2px}
+.conn-detail{border:1px solid #30363d;border-radius:8px;margin-bottom:10px;overflow:hidden}
+.conn-detail .cd-head{display:flex;justify-content:space-between;align-items:center;padding:8px 12px;background:#0d1117;cursor:pointer;gap:10px}
+.conn-detail .cd-head:hover{background:#161b22}
+.conn-detail .cd-head .proc{font-size:13px;color:#c9d1d9;font-weight:600}
+.conn-detail .cd-head .meta{font-size:11px;color:#8b949e;text-align:right;flex-shrink:0}
+.conn-detail .cd-body{padding:10px 12px;display:none;font-size:12px}
+.conn-detail.open .cd-body{display:block}
+.kv{display:flex;gap:8px;margin:3px 0}
+.kv .k{color:#8b949e;min-width:84px;flex-shrink:0}
+.kv .val{color:#c9d1d9;word-break:break-all}
+.cmdline{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:11px;color:#d29922;background:#0d1117;padding:6px 8px;border-radius:4px;margin-top:6px;word-break:break-all}
+.reason-list{margin:4px 0 0 0;padding-left:18px}
+.reason-list li{color:#f85149;font-size:12px;margin:2px 0}
+.dir-up{color:#f85149}
+.dir-down{color:#3fb950}
+.dir-bi{color:#58a6ff}
 </style>
 </head>
 <body>
@@ -211,13 +246,16 @@ select:focus,input:focus{outline:none;border-color:#58a6ff}
     </div>
   </div>
   <!-- 地理位置地图 -->
-  <div class="net-map-section">
+  <div class="net-map-section" id="net-map-section">
     <div class="map-header">
       <h3>网络连接地理分布</h3>
-      <div class="legend">
-        <span><span class="dot" style="background:#f85149"></span>主要外发（上传>接收）</span>
-        <span><span class="dot" style="background:#3fb950"></span>主要接收（接收>上传）</span>
-        <span><span class="dot" style="background:#58a6ff"></span>双向流量</span>
+      <div class="right">
+        <div class="legend">
+          <span><span class="dot" style="background:#f85149"></span>主要外发（上传>接收）</span>
+          <span><span class="dot" style="background:#3fb950"></span>主要接收（接收>上传）</span>
+          <span><span class="dot" style="background:#58a6ff"></span>双向流量</span>
+        </div>
+        <button class="btn map-toggle-btn" onclick="toggleMap()" id="map-toggle-btn">⊟ 收起地图</button>
       </div>
     </div>
     <div id="net-map-chart">
@@ -226,6 +264,10 @@ select:focus,input:focus{outline:none;border-color:#58a6ff}
         <button class="map-btn" onclick="mapZoomOut()" title="缩小">-</button>
         <button class="map-btn" onclick="mapResetView()" title="复位地图" style="font-size:14px">⟳</button>
       </div>
+    </div>
+    <div class="reopen-bar">
+      <span>地图已收起（点击连线或节点的分析仍可用）</span>
+      <button class="btn primary map-toggle-btn" onclick="toggleMap()">⊞ 打开地图</button>
     </div>
   </div>
   <div class="scroll" id="net-table-container">
@@ -545,6 +587,14 @@ function switchPanel(name) {
   document.getElementById('btn-' + name).classList.add('active');
   if (name === 'overview') loadOverview();
   if (name === 'ai') loadAIStatus();
+  if (name === 'network') {
+    // 面板变为可见后，待浏览器完成布局再重测尺寸并重绘，
+    // 避免地图在“未布局/隐藏”态初始化导致缩到一侧、无法拖动
+    if (_netMapChart) {
+      requestAnimationFrame(function() { if (_netMapChart) _netMapChart.resize(); });
+    }
+    loadConnections();
+  }
 }
 
 // ====== 概览 ======
@@ -672,7 +722,7 @@ async function loadConnections() {
     const data = await res.json();
     _lastConnData = data.connections;
     renderConnectionTable(_lastConnData);
-    renderNetMap(_lastConnData);
+    renderNetMap(data);
   } catch(e) { container.innerHTML = '<div class="loading">加载失败: '+e+'</div>'; }
 }
 
@@ -735,9 +785,11 @@ function sortByNet(key) {
 // ====== 网络连接地理地图 ======
 let _netMapChart = null;
 let _worldJsonLoaded = false;
-let _homeCoord = [104.0, 35.0]; // 默认中国中心，首次加载数据后自动更新
+let _homeCoord = [104.0, 35.0]; // 本机(连线源点)坐标，由后端 home_coord 提供
+let _homeGeoStr = '本机';
 let _lastMapPoints = []; // 保存最近一次绘制的散点数据，供复位使用
 let _lastMapRawConns = null; // 保存原始连接数据，供复位重建使用
+let _mapCollapsed = false; // 地图是否已收起
 
 function _getFlowColor(sent, recv) {
   sent = sent || 0;
@@ -749,26 +801,28 @@ function _getFlowColor(sent, recv) {
   return '#58a6ff'; // 双向流量 → 蓝色
 }
 
-function renderNetMap(conns) {
+function renderNetMap(data) {
   const chartDom = document.getElementById('net-map-chart');
   if (!chartDom) return;
-  _lastMapRawConns = conns; // 保存原始连接数据供复位使用
+  const conns = (data && data.connections) || [];
+  _lastMapRawConns = data; // 保存完整响应供复位使用
 
-  // 收集有坐标的公网连接
+  // 后端提供的本机坐标作为连线源点（万不得已才用默认中国中心）
+  if (data && data.home_coord && data.home_coord.length === 2) {
+    _homeCoord = data.home_coord;
+    _homeGeoStr = data.home_geo_str || '本机';
+  }
+
   const points = [];
+  const lines = [];
   const seenCoords = {};
-  (conns || []).forEach(function(c) {
+  conns.forEach(function(c) {
     const lng = c.geo && c.geo.lng;
     const lat = c.geo && c.geo.lat;
     if (lng && lat) {
-      // 用第一条有坐标的连接推断本机位置
-      if (_homeCoord[0] === 104.0 && _homeCoord[1] === 35.0) {
-        _homeCoord = [lng, lat];
-      }
       const key = lng + ',' + lat;
       const sent = c.bytes_sent || 0;
       const recv = c.bytes_recv || 0;
-      const color = _getFlowColor(sent, recv);
       if (!seenCoords[key]) {
         seenCoords[key] = { sent: 0, recv: 0, count: 0, items: [] };
       }
@@ -779,7 +833,13 @@ function renderNetMap(conns) {
     }
   });
 
-  // 按坐标聚合点
+  // 计算数据量最大值，用于连线粗细归一化（按远端坐标汇总上下行总量）
+  let maxTotal = 0;
+  Object.keys(seenCoords).forEach(function(k) {
+    const a = seenCoords[k];
+    if (a.sent + a.recv > maxTotal) maxTotal = a.sent + a.recv;
+  });
+
   Object.keys(seenCoords).forEach(function(key) {
     const parts = key.split(',');
     const lng = parseFloat(parts[0]);
@@ -788,10 +848,10 @@ function renderNetMap(conns) {
     const color = _getFlowColor(agg.sent, agg.recv);
     const sentStr = _formatBytes(agg.sent);
     const recvStr = _formatBytes(agg.recv);
-    // 取第一个连接的信息做展示
+    const total = agg.sent + agg.recv;
     const first = agg.items[0];
     let tooltip = '<div style="font-weight:600;margin-bottom:4px">' + first.geo.geo_str + '</div>';
-    tooltip += '<div style="font-size:11px;color:#8b949e">' + agg.count + ' 个连接</div>';
+    tooltip += '<div style="font-size:11px;color:#8b949e">' + agg.count + ' 个连接 · 本机→' + first.geo.geo_str + '</div>';
     tooltip += '<div style="font-size:11px">发送: ' + sentStr + ' | 接收: ' + recvStr + '</div>';
     agg.items.slice(0, 5).forEach(function(c) {
       tooltip += '<div style="font-size:11px;color:#8b949e;margin-top:2px">' + c.remote_ip + ':' + c.remote_port + ' | ' + (c.process||'?') + '</div>';
@@ -802,22 +862,36 @@ function renderNetMap(conns) {
       name: first.geo.geo_str,
       value: [lng, lat, agg.count],
       itemStyle: { color: color, shadowBlur: 6, shadowColor: color },
-      tooltipHtml: tooltip
+      tooltipHtml: tooltip,
+      conns: agg.items // 供点击弹窗使用
     });
+
+    // 连线：本机(源点) → 远端(目标点)；跳过与本机重合的零长连线
+    if (_homeCoord[0] !== lng || _homeCoord[1] !== lat) {
+      lines.push({
+        coords: [[_homeCoord[0], _homeCoord[1]], [lng, lat]],
+        lineStyle: { width: _lineWidthFor(total, maxTotal), color: color, opacity: 0.55, curveness: 0.2 },
+        tooltipHtml: tooltip,
+        conns: agg.items // 供点击弹窗使用
+      });
+    }
   });
 
   if (!_netMapChart) {
     _netMapChart = echarts.init(chartDom);
     window.addEventListener('resize', function() { if (_netMapChart) _netMapChart.resize(); });
+    _netMapChart.on('click', _onMapClick);
   }
   // 确保 chart 尺寸与容器同步，防止偶发缩窄
   _netMapChart.resize();
+  // 布局可能刚随面板切换变化，下一帧再测一次尺寸，确保 geo 撑满容器
+  requestAnimationFrame(function() { if (_netMapChart) _netMapChart.resize(); });
 
   if (!_worldJsonLoaded) {
     fetch('/data/world.json').then(function(r) { return r.json(); }).then(function(worldJson) {
       echarts.registerMap('world', worldJson);
       _worldJsonLoaded = true;
-      _drawNetMap(points);
+      _drawNetMap(points, lines);
     }).catch(function(e) {
       console.error('加载world.json失败:', e);
       _netMapChart.setOption({
@@ -825,11 +899,21 @@ function renderNetMap(conns) {
       });
     });
   } else {
-    _drawNetMap(points);
+    _drawNetMap(points, lines);
   }
 }
 
-function _drawNetMap(points) {
+// 连线粗细：按传输数据量(发送+接收)的对数比例归一化，粗线=大数据量
+function _lineWidthFor(total, maxTotal) {
+  if (!maxTotal || maxTotal <= 0) return 1.4;
+  const maxLog = Math.log10(1 + maxTotal);
+  const t = Math.log10(1 + (total || 0)) / maxLog; // 0..1
+  return 1.2 + t * 5.3; // 约 1.2px(最小) ~ 6.5px(最大)
+}
+
+function _drawNetMap(points, lines) {
+  const homeTooltip = '<div style="font-weight:600">本机位置（连线源点）</div>' +
+    '<div style="font-size:11px;color:#8b949e">' + _homeGeoStr + '</div>';
   const option = {
     backgroundColor: '#0d1117',
     tooltip: {
@@ -857,31 +941,55 @@ function _drawNetMap(points) {
       emphasis: { itemStyle: { areaColor: '#21262d' }, label: { show: false } },
       scaleLimit: { min: 1, max: 15 }
     },
-    series: [{
-      name: '网络连接',
-      type: 'scatter',
-      coordinateSystem: 'geo',
-      data: points,
-      symbolSize: function(val) {
-        return Math.min(8 + val[2] * 2, 25);
+    series: [
+      {
+        name: '连接线路',
+        type: 'lines',
+        coordinateSystem: 'geo',
+        zlevel: 1,
+        effect: { show: true, period: 5, trailLength: 0.15, symbol: 'arrow', symbolSize: 4, color: '#ffffff' },
+        lineStyle: { color: '#58a6ff', width: 1.5, opacity: 0.5, curveness: 0.2 },
+        data: lines
       },
-      label: { show: false },
-      emphasis: {
-        scale: 1.5,
-        label: {
-          show: true,
-          formatter: function(p) { return p.data.name; },
-          position: 'top',
-          color: '#58a6ff',
-          fontSize: 11,
-          backgroundColor: '#161b22',
-          borderColor: '#30363d',
-          borderWidth: 1,
-          padding: [4, 8],
-          borderRadius: 4
+      {
+        name: '网络连接',
+        type: 'scatter',
+        coordinateSystem: 'geo',
+        zlevel: 2,
+        data: points,
+        symbolSize: function(val) {
+          return Math.min(8 + val[2] * 2, 25);
+        },
+        label: { show: false },
+        emphasis: {
+          scale: 1.5,
+          label: {
+            show: true,
+            formatter: function(p) { return p.data.name; },
+            position: 'top',
+            color: '#58a6ff',
+            fontSize: 11,
+            backgroundColor: '#161b22',
+            borderColor: '#30363d',
+            borderWidth: 1,
+            padding: [4, 8],
+            borderRadius: 4
+          }
         }
+      },
+      {
+        name: '本机',
+        type: 'effectScatter',
+        coordinateSystem: 'geo',
+        zlevel: 3,
+        symbol: 'diamond',
+        symbolSize: 14,
+        rippleEffect: { brushType: 'stroke', scale: 3 },
+        itemStyle: { color: '#f0b400', shadowBlur: 10, shadowColor: '#f0b400' },
+        label: { show: true, formatter: '本机', position: 'right', color: '#f0b400', fontSize: 11, fontWeight: 'bold' },
+        data: [{ name: '本机', value: [_homeCoord[0], _homeCoord[1], 0], tooltipHtml: homeTooltip }]
       }
-    }]
+    ]
   };
   _lastMapPoints = points;
   _netMapChart.setOption(option, true);
@@ -910,6 +1018,149 @@ function mapResetView() {
   if (_lastMapRawConns) {
     renderNetMap(_lastMapRawConns);
   }
+}
+
+// 收起/打开地图
+function toggleMap() {
+  _mapCollapsed = !_mapCollapsed;
+  const sec = document.getElementById('net-map-section');
+  const btn = document.getElementById('map-toggle-btn');
+  if (_mapCollapsed) {
+    sec.classList.add('net-map-collapsed');
+    btn.textContent = '⊞ 打开地图';
+  } else {
+    sec.classList.remove('net-map-collapsed');
+    btn.textContent = '⊟ 收起地图';
+    // 地图重新显示后，等浏览器完成布局再重测尺寸，避免仍按隐藏态宽度绘制
+    requestAnimationFrame(function() { if (_netMapChart) _netMapChart.resize(); });
+  }
+}
+
+// 地图元素点击：连线/远端节点 → 该位置连接分析；本机 → 本地总览
+function _onMapClick(params) {
+  if (!params || !params.data) return;
+  const d = params.data;
+  if (d.name === '本机') { showHomeAnalysis(); return; }
+  if (d.conns && d.conns.length) {
+    const geoStr = (d.conns[0].geo && d.conns[0].geo.geo_str) || '未知位置';
+    showConnAnalysis(d.conns, geoStr);
+  }
+}
+
+function _esc(s) {
+  if (s === null || s === undefined) return '';
+  return String(s)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+
+function _asCard(l, v) {
+  return '<div class="as-card"><div class="l">' + _esc(l) + '</div><div class="v">' +
+    (typeof v === 'number' ? v : _esc(String(v))) + '</div></div>';
+}
+
+function _dirInfo(c) {
+  if (c.direction === 'upload') return { cls: 'dir-up', text: '外发(上传)' };
+  if (c.direction === 'download') return { cls: 'dir-down', text: '接收(下载)' };
+  if (c.direction === 'bidirectional') return { cls: 'dir-bi', text: '双向' };
+  return { cls: '', text: c.direction || '—' };
+}
+
+function _riskBadge(rl) {
+  return rl === 'high' ? '<span class="badge high">高危</span>'
+    : rl === 'medium' ? '<span class="badge medium">中危</span>'
+    : '<span class="badge low">正常</span>';
+}
+
+// 单个 geo 位置下全部连接的分析弹窗
+function showConnAnalysis(conns, geoStr) {
+  document.getElementById('conn-modal-title').textContent = '连接分析 · ' + geoStr;
+  let totalSent = 0, totalRecv = 0, up = 0, down = 0, bi = 0, hi = 0, med = 0, lo = 0;
+  const procs = {};
+  conns.forEach(function(c) {
+    totalSent += (c.bytes_sent || 0);
+    totalRecv += (c.bytes_recv || 0);
+    if (c.direction === 'upload') up++; else if (c.direction === 'download') down++; else if (c.direction === 'bidirectional') bi++;
+    if (c.risk_level === 'high') hi++; else if (c.risk_level === 'medium') med++; else lo++;
+    const pname = c.process || '(未知进程)';
+    procs[pname] = (procs[pname] || 0) + 1;
+  });
+  const procNames = Object.keys(procs);
+  let html = '<div class="analysis-summary">' +
+    _asCard('连接数', conns.length) +
+    _asCard('涉及进程', procNames.length) +
+    _asCard('总发送', _formatBytes(totalSent)) +
+    _asCard('总接收', _formatBytes(totalRecv)) +
+    _asCard('外发/接收/双向', up + ' / ' + down + ' / ' + bi) +
+    _asCard('高危/中危/低危', hi + ' / ' + med + ' / ' + lo) +
+    '</div>';
+  html += '<div style="font-size:12px;color:#8b949e;margin:2px 0 12px">涉及进程: ' +
+    procNames.map(function(p) { return _esc(p) + '(' + procs[p] + ')'; }).join(', ') + '</div>';
+
+  conns.forEach(function(c, i) {
+    const di = _dirInfo(c);
+    const reasons = (c.risk_reasons && c.risk_reasons.length)
+      ? '<ul class="reason-list">' + c.risk_reasons.map(function(r) { return '<li>' + _esc(r) + '</li>'; }).join('') + '</ul>'
+      : '<div style="color:#3fb950;font-size:12px">无明显风险特征</div>';
+    const cmdline = c.process_cmdline ? '<div class="cmdline">' + _esc(c.process_cmdline) + '</div>' : '';
+    const dt = c.data_type ? c.data_type : '—';
+    const localPorts = (c.local_ports && c.local_ports.length) ? c.local_ports.join(', ') : (c.local_ip + ':' + c.local_port);
+    const geoDetail = (c.geo && (c.geo.country || c.geo.area)) ? (c.geo.country + (c.geo.area ? ' ' + c.geo.area : '')) : (c.geo && c.geo.geo_str ? c.geo.geo_str : '未知');
+    const osInfo = c.remote_os ? ' · ' + _esc(c.remote_os) : '';
+    html += '<div class="conn-detail" id="cd-' + i + '">' +
+      '<div class="cd-head" onclick="document.getElementById(\'cd-' + i + '\').classList.toggle(\'open\')">' +
+        '<span class="proc">' + _esc(c.process || '(未知进程)') + '</span>' +
+        '<span class="meta">' + _esc(c.remote_ip) + ':' + (c.remote_port || '') + ' · ' + _esc(c.protocol || '') +
+          ' · <span class="' + di.cls + '">' + di.text + '</span> · ' + _riskBadge(c.risk_level) + '</span>' +
+      '</div>' +
+      '<div class="cd-body">' +
+        '<div class="kv"><span class="k">PID / 用户</span><span class="val">' + (c.pid || '—') + ' / ' + _esc(c.process_user || '—') + '</span></div>' +
+        '<div class="kv"><span class="k">本地端口</span><span class="val">' + _esc(localPorts) + '</span></div>' +
+        '<div class="kv"><span class="k">远端地址</span><span class="val">' + _esc(c.remote_ip) + ':' + (c.remote_port || '') + ' (' + _esc(geoDetail) + osInfo + ')</span></div>' +
+        '<div class="kv"><span class="k">状态</span><span class="val">' + _esc(c.state || '—') + (c.age_str ? ' · 已建立 ' + _esc(c.age_str) : '') + '</span></div>' +
+        '<div class="kv"><span class="k">流量方向</span><span class="val"><span class="' + di.cls + '">' + di.text + '</span></span></div>' +
+        '<div class="kv"><span class="k">数据类型</span><span class="val">' + _esc(dt) + '</span></div>' +
+        '<div class="kv"><span class="k">数据量</span><span class="val">发送 ' + _formatBytes(c.bytes_sent || 0) + ' · 接收 ' + _formatBytes(c.bytes_recv || 0) +
+          (c.frequency_desc ? ' · ' + _esc(c.frequency_desc) : '') + '</span></div>' +
+        cmdline +
+        '<div class="kv" style="margin-top:8px"><span class="k">风险研判</span></div>' +
+        reasons +
+      '</div>' +
+    '</div>';
+  });
+
+  document.getElementById('conn-modal-body').innerHTML = html;
+  document.getElementById('conn-modal-overlay').classList.add('show');
+}
+
+// 本机节点：展示本机对外连接总览
+function showHomeAnalysis() {
+  document.getElementById('conn-modal-title').textContent = '本机连接总览 · ' + _homeGeoStr;
+  const conns = (_lastMapRawConns && _lastMapRawConns.connections) || [];
+  let total = conns.length, pub = 0, hi = 0, med = 0, lo = 0, listeners = 0;
+  const countries = {};
+  conns.forEach(function(c) {
+    if (c.is_public) pub++;
+    if (c.risk_level === 'high') hi++; else if (c.risk_level === 'medium') med++; else lo++;
+    if (c.direction === 'listen') listeners++;
+    const g = c.geo && c.geo.country; if (g) countries[g] = (countries[g] || 0) + 1;
+  });
+  const countryStr = Object.keys(countries).sort(function(a, b) { return countries[b] - countries[a]; })
+    .slice(0, 8).map(function(k) { return k + '(' + countries[k] + ')'; }).join(', ') || '—';
+  const html = '<div class="analysis-summary">' +
+    _asCard('总连接', total) +
+    _asCard('公网连接', pub) +
+    _asCard('监听端口', listeners) +
+    _asCard('高危/中危/低危', hi + ' / ' + med + ' / ' + lo) +
+    '</div>' +
+    '<div class="kv" style="margin-top:8px"><span class="k">远端国家/地区</span><span class="val">' + _esc(countryStr) + '</span></div>' +
+    '<div style="font-size:12px;color:#8b949e;margin-top:10px">点击地图上的连线或远端节点，可查看该位置的进程与网络活动详细分析。</div>';
+  document.getElementById('conn-modal-body').innerHTML = html;
+  document.getElementById('conn-modal-overlay').classList.add('show');
+}
+
+function closeConnModal() {
+  document.getElementById('conn-modal-overlay').classList.remove('show');
 }
 
 function _formatBytes(bytes) {
@@ -1128,6 +1379,20 @@ function toggleAutoRefresh(type) {
 // 初始化
 loadOverview();
 setInterval(loadOverview, 10000);
+document.addEventListener('keydown', function(e) {
+  if (e.key === 'Escape') closeConnModal();
+});
 </script>
+
+<!-- 连接分析弹窗 -->
+<div class="modal-overlay" id="conn-modal-overlay" onclick="if(event.target===this)closeConnModal()">
+  <div class="conn-modal" id="conn-modal">
+    <div class="modal-head">
+      <h3 id="conn-modal-title">连接分析</h3>
+      <button class="x" onclick="closeConnModal()" title="关闭">×</button>
+    </div>
+    <div class="modal-body" id="conn-modal-body"></div>
+  </div>
+</div>
 </body>
 </html>
