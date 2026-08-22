@@ -224,7 +224,7 @@ select:focus,input:focus{outline:none;border-color:#58a6ff}
       <div class="map-controls">
         <button class="map-btn" onclick="mapZoomIn()" title="放大">+</button>
         <button class="map-btn" onclick="mapZoomOut()" title="缩小">-</button>
-        <button class="map-btn" onclick="mapResetCenter()" title="回到中心" style="font-size:14px">⊙</button>
+        <button class="map-btn" onclick="mapResetView()" title="复位地图" style="font-size:14px">⟳</button>
       </div>
     </div>
   </div>
@@ -688,6 +688,8 @@ function sortByNet(key) {
 let _netMapChart = null;
 let _worldJsonLoaded = false;
 let _homeCoord = [104.0, 35.0]; // 默认中国中心，首次加载数据后自动更新
+let _lastMapPoints = []; // 保存最近一次绘制的散点数据，供复位使用
+let _lastMapRawConns = null; // 保存原始连接数据，供复位重建使用
 
 function _getFlowColor(sent, recv) {
   sent = sent || 0;
@@ -702,6 +704,7 @@ function _getFlowColor(sent, recv) {
 function renderNetMap(conns) {
   const chartDom = document.getElementById('net-map-chart');
   if (!chartDom) return;
+  _lastMapRawConns = conns; // 保存原始连接数据供复位使用
 
   // 收集有坐标的公网连接
   const points = [];
@@ -759,6 +762,8 @@ function renderNetMap(conns) {
     _netMapChart = echarts.init(chartDom);
     window.addEventListener('resize', function() { if (_netMapChart) _netMapChart.resize(); });
   }
+  // 确保 chart 尺寸与容器同步，防止偶发缩窄
+  _netMapChart.resize();
 
   if (!_worldJsonLoaded) {
     fetch('/data/world.json').then(function(r) { return r.json(); }).then(function(worldJson) {
@@ -794,6 +799,10 @@ function _drawNetMap(points) {
       map: 'world',
       roam: true,
       silent: false,
+      left: 0,
+      top: 0,
+      right: 0,
+      bottom: 0,
       center: _homeCoord,
       zoom: 4,
       itemStyle: { areaColor: '#161b22', borderColor: '#30363d' },
@@ -826,6 +835,7 @@ function _drawNetMap(points) {
       }
     }]
   };
+  _lastMapPoints = points;
   _netMapChart.setOption(option, true);
 }
 
@@ -843,9 +853,15 @@ function mapZoomOut() {
   _netMapChart.setOption({ geo: { zoom: Math.max(zoom / 1.3, 1) } });
 }
 
-function mapResetCenter() {
+function mapResetView() {
   if (!_netMapChart) return;
-  _netMapChart.setOption({ geo: { center: _homeCoord, zoom: 4 } });
+  // 完全销毁并重建图表，解决偶发布局异常（地图缩到左侧无法拖动）
+  _netMapChart.dispose();
+  _netMapChart = null;
+  _worldJsonLoaded = false; // 强制重新注册地图
+  if (_lastMapRawConns) {
+    renderNetMap(_lastMapRawConns);
+  }
 }
 
 function _formatBytes(bytes) {
