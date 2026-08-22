@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2024 linmon contributors
 """
 geo_locator.py — IP归属地查询模块（统一模块，替代原来 sysdiag.py 和 netmap.py 中重复的实现）
 支持纯真IP库(qqwry.dat)查询，含坐标映射

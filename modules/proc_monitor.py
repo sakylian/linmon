@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2024 linmon contributors
 """
 proc_monitor.py — 进程详细监控模块
 功能：采集进程启动时间/启动用户/关联进程/定时启动检测/网络连接/使用端口
@@ -517,6 +519,118 @@ def _is_kernel_thread(proc_info):
     return False
 
 
+def _exe_is_deleted(pid):
+    """通过 /proc/<pid>/exe 符号链接判断是否已被删除（典型入侵残留）。
+
+    注意：非特权用户读取其它用户的 /proc/<pid>/exe 会触发 PermissionError，
+    此时无法确认是否删除，保守返回 False，由调用方结合扫描器权限判断。
+    """
+    try:
+        target = os.readlink(f'/proc/{pid}/exe')
+        return target.endswith(' (deleted)')
+    except (OSError, ValueError):
+        return False
+
+
+# ---------- 多维恶意特征研判（降低漏报） ----------
+# 说明：从“纯进程名匹配”升级为 名称 + 路径 + 命令行 + 文件哈希 综合研判。
+# 哈希校验仅在其它信号命中时才触发，避免对全部进程逐一计算哈希带来的性能开销。
+
+_MALWARE_NAME_HINTS = ('xmrig', 'cryptominer', 'minerd', 'kdevtmpfsi', 'kinsing')
+_SUSPICIOUS_PATHS = ('/tmp/', '/dev/shm/', '/var/tmp/', '/dev/.', '/proc/')
+# 反向Shell特征（避免过于宽泛的匹配导致误报，保留高置信度特征）
+_REV_SHELL_PATTERNS = ('/dev/tcp/', 'bash -i ', 'nc -e ', 'ncat -e',
+                       'exec 5<>/dev/tcp', 'pty.spawn', 'socket.socket(')
+_DOWNLOAD_EXEC = ('curl', 'wget', 'fetch')
+_SHELL_INTERP = ('bash', 'sh', 'python', 'python3', 'perl', 'ruby')
+# 矿池/挖矿连接特征（保留高置信度特征，避免 -o 等通用参数误报）
+_MINING_PATTERNS = ('stratum+tcp://', 'stratum+ssl://', 'xmrpool', 'nanopool',
+                    'minergate', 'minexmr', 'supportxmr', '--donate-level')
+
+# 已知恶意样本 SHA256 集合（可在此追加，或放置于 modules/malware_hashes.txt，每行: <hash> [描述]）
+KNOWN_MALWARE_HASHES = {
+    # 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855': '示例占位',
+}
+_MALWARE_HASHES_CACHE = None
+
+
+def _load_malware_hashes():
+    """加载可选的恶意样本哈希库（modules/malware_hashes.txt），带缓存。"""
+    global _MALWARE_HASHES_CACHE
+    if _MALWARE_HASHES_CACHE is not None:
+        return _MALWARE_HASHES_CACHE
+    hashes = dict(KNOWN_MALWARE_HASHES)
+    path = os.path.join(os.path.dirname(__file__), 'malware_hashes.txt')
+    try:
+        with open(path, 'r', encoding='utf-8') as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith('#'):
+                    continue
+                parts = line.split(None, 1)
+                h = parts[0].lower()
+                hashes[h] = parts[1] if len(parts) > 1 else ''
+    except FileNotFoundError:
+        pass
+    _MALWARE_HASHES_CACHE = hashes
+    return hashes
+
+
+def _sha256_file(path, chunk=65536):
+    import hashlib
+    m = hashlib.sha256()
+    with open(path, 'rb') as f:
+        for blk in iter(lambda: f.read(chunk), b''):
+            m.update(blk)
+    return m.hexdigest()
+
+
+def _detect_malware_signals(proc_info):
+    """多维恶意特征研判，返回 (is_malware, reasons)。
+
+    研判维度：
+      - 进程名匹配已知恶意软件字典 (category=='malware' 或名称命中 _MALWARE_NAME_HINTS)
+      - 可执行文件位于可疑路径 (临时目录/隐藏目录)
+      - 命令行含反向Shell、下载即执行(dropper)、矿池连接等特征
+      - 文件 SHA256 命中已知恶意样本库（仅在前述任一信号命中时计算，控制开销）
+    """
+    name = (proc_info.get('name', '') or '').lower()
+    cmdline = (proc_info.get('cmdline', '') or '').lower()
+    exe = proc_info.get('exe', '') or ''
+    reasons = []
+
+    name_hit = name in _MALWARE_NAME_HINTS or proc_info.get('category') == 'malware'
+    path_hit = bool(exe) and any(p in exe for p in _SUSPICIOUS_PATHS)
+    rev_hit = any(p in cmdline for p in _REV_SHELL_PATTERNS)
+
+    if rev_hit:
+        reasons.append('高危: 命令行含反向Shell特征')
+    # 下载即执行：存在下载命令且通过管道交给解释器
+    if any(d in cmdline for d in _DOWNLOAD_EXEC) and \
+            any(f'| {s}' in cmdline for s in _SHELL_INTERP):
+        reasons.append('高危: 命令行含下载即执行(dropper)特征')
+    if any(p in cmdline for p in _MINING_PATTERNS):
+        reasons.append('高危: 命令行含矿池/挖矿连接特征')
+    if name_hit:
+        reasons.append('进程名匹配已知恶意软件特征')
+    if path_hit:
+        reasons.append(f'可执行文件位于可疑路径: {exe}')
+
+    # 多维命中时再做哈希校验（开销较大，仅在疑似时触发）
+    if (name_hit or path_hit or rev_hit) and exe and os.path.isfile(exe):
+        try:
+            h = _sha256_file(exe)
+            known = _load_malware_hashes()
+            if h in known:
+                reasons.append(f'高危: 可执行文件哈希命中已知恶意样本库: {known[h]}')
+            elif known:
+                reasons.append(f'可执行文件SHA256: {h}')
+        except OSError:
+            pass
+
+    return bool(reasons), reasons
+
+
 def _detect_high_risk(proc_info):
     """检测高危进程"""
     name = proc_info.get('name', '').lower()
@@ -529,13 +643,9 @@ def _detect_high_risk(proc_info):
 
     risk_reasons = []
 
-    # 恶意软件
-    if category == 'malware':
-        risk_reasons.append(f'已知恶意软件: {desc}')
-    if 'miner' in name or 'xmrig' in name or 'cryptominer' in name:
-        risk_reasons.append('挖矿程序特征')
-    if 'kdevtmpfsi' in name:
-        risk_reasons.append('伪装内核进程的挖矿木马')
+    # 多维恶意特征研判（名称 + 路径 + 命令行 + 哈希）
+    malware_hit, malware_reasons = _detect_malware_signals(proc_info)
+    risk_reasons.extend(malware_reasons)
 
     # 可疑网络工具
     if name in ('nc', 'ncat', 'socat') and proc_info.get('listening_ports'):
@@ -549,6 +659,9 @@ def _detect_high_risk(proc_info):
     exe_path = proc_info.get('exe', '')
     if exe_path and ('/tmp/' in exe_path or '/dev/shm/' in exe_path):
         risk_reasons.append(f'从临时目录运行: {exe_path}')
+    # exe 路径本身即标记为已删除（psutil 读到的 (deleted) 残留）
+    if exe_path and exe_path.endswith(' (deleted)'):
+        risk_reasons.append('可执行文件已被删除但仍运行中（典型入侵残留）')
 
     # 隐藏或无路径 (排除内核线程和已知系统服务用户)
     if not exe_path and proc_info.get('pid', 0) > 1:
@@ -573,8 +686,18 @@ def _detect_high_risk(proc_info):
             safe_no_exe_names = {'(sd-pam)', 'fusermount3', 'fusermount'}
             if username in system_service_users or name in safe_no_exe_names:
                 pass  # 系统服务用户，exe 不可读是正常的，不标记
-            elif username and username != 'root':
-                risk_reasons.append('可执行文件路径不可读（可能已删除或隐藏）')
+            else:
+                pid = proc_info.get('pid', 0)
+                if _exe_is_deleted(pid):
+                    # 高置信：二进制确实已被删除却仍在运行（与扫描器权限无关）
+                    risk_reasons.append('可执行文件已被删除但仍运行中（典型入侵残留）')
+                elif username and username != 'root':
+                    # 非 root 进程：其 exe 在非特权下本应可读，不可读即可疑
+                    risk_reasons.append('进程可执行文件路径不可读（可能已隐藏）')
+                elif os.geteuid() == 0:
+                    # root 进程：仅当扫描器本身也是 root 时才可疑；
+                    # 否则多为权限不足导致的误报，不应标记
+                    risk_reasons.append('root进程可执行文件路径不可读（可能已删除或隐藏）')
 
     # 反弹shell特征
     if name in ('bash', 'sh', 'zsh', 'python', 'python3') and proc_info.get('network_connections'):

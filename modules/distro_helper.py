@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2024 linmon contributors
 """
 distro_helper.py — 发行版适配模块
 支持 Debian 系 (Ubuntu/Debian) 和 CentOS 系 (RHEL/CentOS/Rocky/AlmaLinux)

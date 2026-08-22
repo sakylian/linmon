@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2024 linmon contributors
 """
 webserver.py — Flask Web 服务
 提供实时进程/网络监控面板 + AI分析接口
@@ -8,6 +10,7 @@ import os
 import sys
 import json
 import time
+import secrets
 import threading
 import logging
 
@@ -16,14 +19,84 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from flask import Flask, request, jsonify, render_template, send_from_directory
 
 from modules.proc_monitor import get_all_processes, get_system_boot_info, get_process_summary
-from modules.net_monitor import get_all_connections, get_network_summary, run_traceroute
+from modules.net_monitor import get_all_connections, get_network_summary, run_traceroute, start_frequency_sampler, configure_geo_risk
 from modules.geo_locator import find_qqwry_dat, GeoLocator
 from modules.distro_helper import get_distro
 from modules.ai_analyzer import get_analyzer
+from modules.audit import log_event
 
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__, template_folder='templates')
+
+# ===================== Web 面板配置与鉴权 =====================
+WEB_CONFIG_PATHS = [
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), 'config', 'web_config.json'),
+    os.path.expanduser('~/.config/linmon/web_config.json'),
+    '/etc/linmon/web_config.json',
+]
+DEFAULT_WEB_CONFIG = {
+    'host': '127.0.0.1',     # 默认仅本机，避免把监控面板暴露到全网
+    'port': 8765,
+    'auth_enabled': True,     # 默认开启令牌鉴权
+    'auth_token': '',         # 为空时启动时自动生成并写回
+}
+
+
+def _load_web_config():
+    cfg = DEFAULT_WEB_CONFIG.copy()
+    for p in WEB_CONFIG_PATHS:
+        if p and os.path.isfile(p):
+            try:
+                with open(p, 'r', encoding='utf-8') as f:
+                    cfg.update(json.load(f))
+            except (json.JSONDecodeError, IOError) as e:
+                logger.warning(f'加载 web 配置失败 {p}: {e}')
+            break
+    # 自动生成令牌并持久化
+    if cfg.get('auth_enabled') and not cfg.get('auth_token'):
+        cfg['auth_token'] = secrets.token_hex(16)
+        _save_web_config(cfg)
+    return cfg
+
+
+def _save_web_config(cfg):
+    path = WEB_CONFIG_PATHS[0]
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, 'w', encoding='utf-8') as f:
+        json.dump(cfg, f, ensure_ascii=False, indent=4)
+    try:
+        os.chmod(path, 0o600)
+    except OSError:
+        pass
+
+
+# 全局 web 配置（启动后填充）
+_web_cfg = None
+
+
+def _current_token():
+    # 允许通过环境变量临时覆盖（便于脚本/自动化）
+    return os.environ.get('LINMON_WEB_TOKEN') or (_web_cfg or {}).get('auth_token', '')
+
+
+@app.before_request
+def _auth_guard():
+    """保护所有 /api/* 接口；未携带有效 Bearer 令牌即 401。"""
+    cfg = _web_cfg or DEFAULT_WEB_CONFIG
+    if not cfg.get('auth_enabled'):
+        return
+    if not request.path.startswith('/api/'):
+        return
+    auth = request.headers.get('Authorization', '')
+    if auth.startswith('Bearer '):
+        token = auth[7:].strip()
+    else:
+        token = request.args.get('token', '')
+    expected = _current_token()
+    if not expected or not token or not secrets.compare_digest(token, expected):
+        return jsonify({'error': '未授权: 缺少或错误的访问令牌'}), 401
+
 
 # 静态资源路由 (echarts.min.js, world.json 等)
 DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data')
@@ -193,6 +266,7 @@ def api_ai_config():
                     continue
                 analyzer.config[key] = new_val
         path = analyzer.save_config()
+        log_event('config_change', f'ai_config saved (enabled={analyzer.is_enabled()}, allow_external_ai={analyzer.is_external_allowed()})')
         return jsonify({'success': True, 'path': path, 'enabled': analyzer.is_enabled()})
 
 
@@ -242,18 +316,49 @@ def api_ai_analyze():
     return jsonify({'error': '不支持的type参数'}), 400
 
 
+@app.route('/api/ai/preview', methods=['POST'])
+def api_ai_preview():
+    """返回即将发往外部 LLM 的数据摘要（用于发送前确认，不发起外发）"""
+    analyzer = get_analyzer()
+    if not analyzer.is_enabled():
+        return jsonify({'enabled': False})
+    _refresh_data(force=True)
+    preview = analyzer.preview_send(_cached_data['processes'], _cached_data['connections'])
+    preview['enabled'] = True
+    preview['endpoint'] = analyzer.config.get('endpoint', '')
+    return jsonify(preview)
+
+
 @app.route('/api/ai/test', methods=['POST'])
 def api_ai_test():
     """测试AI连接"""
     analyzer = get_analyzer()
     if not analyzer.is_configured():
         return jsonify({'success': False, 'error': '未配置app_id或app_secret'}), 400
+    if not analyzer.is_external_allowed():
+        return jsonify({'success': False, 'error': '外部AI分析已禁用(allow_external_ai=false)，不会向任何第三方发送数据。'}), 400
     result = analyzer._call_ai('请回复"连接成功"。')
     return jsonify(result)
 
 
-def start_server(host='0.0.0.0', port=8765, debug=False):
-    """启动Web服务"""
+def start_server(host=None, port=None, debug=False):
+    """启动Web服务。host/port 为 None 时读取 web_config.json（默认 127.0.0.1:8765）。"""
+    global _web_cfg
+    _web_cfg = _load_web_config()
+    host = host or _web_cfg.get('host') or '127.0.0.1'
+    port = port or _web_cfg.get('port') or 8765
+    try:
+        _a = get_analyzer()
+        configure_geo_risk(_a.config.get('geo_risk_enabled', False),
+                           _a.config.get('high_risk_regions', []))
+        log_event('web_start', f'host={host} port={port} auth={_web_cfg.get("auth_enabled")}')
+    except Exception:
+        pass
+    try:
+        start_frequency_sampler(interval=30)
+    except Exception:
+        pass
+
     print(f'''
 ╔════════════════════════════════════════════════════╗
 ║  linmon Web 监控服务                               ║
@@ -277,8 +382,13 @@ def start_server(host='0.0.0.0', port=8765, debug=False):
                 return
     sock.close()
 
+    token = _current_token()
     print(f'  实际监听端口: {port}')
     print(f'  访问: http://localhost:{port}')
+    if _web_cfg.get('auth_enabled'):
+        print(f'  访问令牌: {token}')
+        print(f'  登录方式: http://localhost:{port}/?token={token}')
+        print(f'  令牌已保存至 config/web_config.json（权限 0600）')
     print(f'  按 Ctrl+C 停止')
     print()
 

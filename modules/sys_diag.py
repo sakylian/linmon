@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2024 linmon contributors
 """
 sys_diag.py — 系统诊断报告模块
 生成 dmesg 风格的系统诊断报告，整合进程监控和网络连接监控

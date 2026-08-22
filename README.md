@@ -149,6 +149,43 @@ linmon ai-config --show
 
 也可以直接编辑配置文件 `config/ai_config.json`，或通过 Web 面板的「AI 配置」按钮在线修改。
 
+## 隐私与数据外发控制（商业化部署必读）
+
+linmon 的 AI 分析需要把检测结果发往**第三方 LLM 端点**。为防止"检测误判时把系统关键信息泄露给第三方"，所有外发行为均做了最小化与显式确认：
+
+- **默认不开机自动外发**：`auto_analyze` 类行为未自动触发，仅在你显式使用 `--ai` 或 Web 面板的「AI 分析」时才会外发。
+- **发送前显式确认**：CLI 使用 `--ai` 会展示"将发送哪些字段 / 发往哪个端点"并需 `y/N` 确认（可用 `--yes` 跳过）；Web 面板在 AI 分析前弹出确认框。
+- **命令行/密钥脱敏**：外发前自动遮蔽 `password`/`token`/`Authorization: Bearer`/`mysql -p`/连接串密码等敏感取值（仍建议生产环境配合离线模式）。
+- **默认不发送内网拓扑**：本机内网 IP、监听端口列表默认**不**随连接/进程信息外发（`send_internal_ips` / `send_listening_ports` 默认 false）。
+- **可一键离线**：设置 `allow_external_ai=false` 后，任何 AI 分析都不会向外部发送任何数据，仅返回本地结论。
+- **Web 面板鉴权**：默认仅监听 `127.0.0.1`，且所有 `/api/*` 接口需 Bearer 令牌鉴权（令牌启动于终端打印并保存于 `config/web_config.json`，权限 0600）。
+
+`config/ai_config.json` 新增/相关配置项：
+
+```json
+{
+  "allow_external_ai": true,        // false 时完全离线，绝不外发
+  "redact_sensitive": true,         // 外发前脱敏命令行/密钥
+  "send_internal_ips": false,       // 是否随连接信息发送本机内网IP
+  "send_listening_ports": false,    // 是否随进程信息发送监听端口
+  "geo_risk_enabled": false,        // 启用"高风险地区外连"本地规则
+  "high_risk_regions": []           // 高风险地区列表，如 ["美国","荷兰"]
+}
+```
+
+> 说明（与早期文档的差异）：「高风险地区外连」本地判定默认**关闭**（避免误报），需显式开启并配置 `high_risk_regions`；「连接频率」分析由 Web 服务的后台采样线程持续采集后生效（CLI 一次性扫描无历史样本时为"无采样数据"，属正常）。
+
+## 第三方数据授权（qqwry.dat / 纯真 IP 库）
+
+IP 归属地查询依赖 **纯真 IP 库（`qqwry.dat`）**，该数据文件受纯真官方授权约束，**不得随本项目源码再分发**。因此：
+
+- 仓库已通过 `.gitignore` 排除 `data/qqwry.dat`，并且该文件**不再纳入版本控制**（仅本地保留）。
+- 部署脚本（`deploy.sh`）复制 `data/` 时会提示：`qqwry.dat` 如存在会被一并复制，但分发给他人前请确认已获得纯真 IP 库授权；若缺失则 IP 归属地功能不可用，不影响其它检测。
+- 使用者需**自行获取授权**后将 `qqwry.dat` 放置于以下任一位置即可生效：`data/qqwry.dat`、`/etc/linmon/qqwry.dat`、`/usr/local/share/qqwry.dat`、`~/qqwry.dat`。
+- 缺少该文件时，`geo_locator` 会优雅降级（归属地显示为"未知"），不会报错中断。
+
+> 商业化发布前请务必确认：交付物中**不包含**未获授权的 `qqwry.dat`，否则可能产生数据授权合规风险。
+
 ## Web 面板
 
 ```bash
@@ -178,7 +215,7 @@ linmon/
 ├── config/
 │   └── ai_config.json     # AI 配置（含密钥，已 gitignore）
 ├── data/
-│   ├── qqwry.dat          # 纯真 IP 归属地数据库
+│   ├── qqwry.dat          # 纯真 IP 归属地数据库（第三方授权数据，需自行获取，不随仓库分发）
 │   ├── echarts.min.js     # ECharts 图表库（地图）
 │   └── world.json         # 世界地图 GeoJSON
 ├── templates/

@@ -303,11 +303,59 @@ select:focus,input:focus{outline:none;border-color:#58a6ff}
   </div>
 </div>
 
+<!-- 登录令牌弹窗 -->
+<div class="modal-overlay" id="login-overlay">
+  <div class="modal" style="max-width:440px">
+    <h2>访问令牌</h2>
+    <p style="color:#8b949e;font-size:13px;margin-bottom:12px">linmon Web 面板需要访问令牌。启动 <code>linmon-web</code> 时终端已打印令牌，也可用 <code>?token=xxx</code> 方式访问。</p>
+    <div class="config-form">
+      <div class="full"><label>访问令牌</label><input id="login-token" type="password" placeholder="粘贴访问令牌"></div>
+    </div>
+    <div class="full" style="display:flex;gap:8px;margin-top:12px">
+      <button class="btn primary" onclick="submitLogin()">登录</button>
+    </div>
+    <div id="login-msg" style="color:#f85149;font-size:12px;margin-top:8px"></div>
+  </div>
+</div>
+
 <div class="toast" id="toast"></div>
 
 <script>
 const API = '';
 let refreshTimers = {proc: null, net: null};
+
+// ====== 访问令牌鉴权 ======
+let AUTH_TOKEN = new URLSearchParams(location.search).get('token')
+               || localStorage.getItem('linmon_token') || '';
+if (AUTH_TOKEN) localStorage.setItem('linmon_token', AUTH_TOKEN);
+
+// 包装 fetch：自动附加 Bearer 令牌，遇到 401 弹出登录框
+const _origFetch = window.fetch;
+window.fetch = async function(url, opts) {
+  opts = opts || {};
+  opts.headers = Object.assign({}, opts.headers);
+  if (AUTH_TOKEN) opts.headers['Authorization'] = 'Bearer ' + AUTH_TOKEN;
+  const res = await _origFetch(url, opts);
+  if (res.status === 401 && !String(url).includes('/api/sysinfo')) {
+    showLogin('访问被拒绝：令牌无效或缺失');
+  }
+  return res;
+};
+
+function showLogin(msg) {
+  const el = document.getElementById('login-overlay');
+  if (msg) document.getElementById('login-msg').textContent = msg;
+  el.classList.add('show');
+}
+function submitLogin() {
+  const t = document.getElementById('login-token').value.trim();
+  if (!t) return;
+  AUTH_TOKEN = t;
+  localStorage.setItem('linmon_token', t);
+  document.getElementById('login-overlay').classList.remove('show');
+  loadOverview();
+  loadAIStatus();
+}
 
 // ====== 排序状态管理 ======
 let procSort = {key: null, order: 'asc'};
@@ -926,6 +974,25 @@ async function aiAnalyze(type, pid, remotePort) {
   const body = isModal ? document.getElementById('ai-modal-body') : document.getElementById('ai-result-container');
   body.innerHTML = '<div class="loading">正在等待AI分析 (可能需要数十秒)...</div>';
   document.getElementById('ai-modal-title').textContent = type==='process'?`AI 进程分析` : type==='connection'?`AI 连接分析` : 'AI 综合安全报告';
+
+  // 外发确认：在把可疑数据发往外部 LLM 前显式确认
+  try {
+    const pv = await fetch(API + '/api/ai/preview', {method:'POST', headers:{'Content-Type':'application/json'}});
+    const preview = await pv.json();
+    if (preview.enabled !== false && preview.allowed && preview.will_send) {
+      const ok = confirm(
+        '即将把以下可疑数据安全外发至第三方 AI 端点进行分析：\n\n' +
+        '端点: ' + (preview.endpoint || '(未知)') + '\n' +
+        '进程数: ' + preview.process_count + '   连接数: ' + preview.connection_count + '\n' +
+        '命令行脱敏: ' + (preview.redact ? '是' : '否') + '\n\n' +
+        '确认发送？'
+      );
+      if (!ok) {
+        body.innerHTML = '<div class="ai-error">已取消外发</div>';
+        return;
+      }
+    }
+  } catch(e) { /* 预览失败不影响后续，由实际请求决定 */ }
 
   try {
     let payload = {type};

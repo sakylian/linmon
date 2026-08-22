@@ -1,0 +1,18 @@
+[Unit]
+Description=linmon Web 监控面板
+Documentation=https://github.com/sakylian/linmon
+After=network.target
+
+[Service]
+# 生产部署请使用专用低权限用户，并通过 web_config.json 限制为本机监听 + 启用令牌鉴权
+User=root
+WorkingDirectory=/opt/linmon
+ExecStart=/opt/linmon/linmon-web
+Restart=on-failure
+RestartSec=5
+# 仅允许本机访问（面板自带令牌鉴权；如需远程请配合反向代理 + TLS）
+IPAddressDeny=*
+IPAddressAllow=127.0.0.1
+
+[Install]
+WantedBy=multi-user.target

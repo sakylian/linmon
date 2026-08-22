@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2024 linmon contributors
 """
 net_monitor.py — 网络连接监控模块
 功能：采集网络连接列表（传送数据量/数据类型/对端OS/发起时间/频率）
@@ -30,6 +32,32 @@ from .proc_monitor import (
 )
 
 logger = logging.getLogger(__name__)
+
+# 地理高风险地区外连判定配置（由 webserver / CLI 注入，默认关闭以避免误报）
+_GEO_RISK = {'enabled': False, 'regions': []}
+
+
+def configure_geo_risk(enabled, regions=None):
+    """配置"高风险地区外连"本地规则。默认关闭。"""
+    _GEO_RISK['enabled'] = bool(enabled)
+    _GEO_RISK['regions'] = list(regions or [])
+
+
+def start_frequency_sampler(interval=30):
+    """启动后台线程周期性采集外连样本，使连接频率分析真正生效。"""
+    import threading
+
+    def _loop():
+        while True:
+            try:
+                sample_connections()
+            except Exception:
+                pass
+            threading.Event().wait(interval)
+
+    t = threading.Thread(target=_loop, name='linmon-freq-sampler', daemon=True)
+    t.start()
+    return t
 
 
 def _run_ss_command():
@@ -293,11 +321,14 @@ def _assess_connection_risk(conn_info):
     if remote_port in suspicious_ports or local_port in suspicious_ports:
         reasons.append(f'可疑后门端口: {remote_port}')
 
-    # 异常外连到高风险地区
-    geo_str = conn_info.get('geo', {}).get('geo_str', '')
-    if '未知' not in geo_str and is_valid_public_ip(remote_ip):
-        # 检查是否连接到非常见地区
-        pass  # 放在AI分析中更合适
+    # 异常外连到高风险地区（本地规则，需显式启用；默认关闭避免误报）
+    if _GEO_RISK['enabled']:
+        geo_str = conn_info.get('geo', {}).get('geo_str', '')
+        country = conn_info.get('geo', {}).get('country', '')
+        for region in _GEO_RISK['regions']:
+            if region and (region in country or region in geo_str):
+                reasons.append(f'连接至高风险地区: {region}')
+                break
 
     # SSH暴力破解迹象
     if remote_port == 22 and direction == 'inbound':

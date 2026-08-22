@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2024 linmon contributors
 """
 linmon.py — Linux 进程与网络连接安全监控工具 (CLI 统一入口)
 """
@@ -18,8 +20,33 @@ from modules.proc_monitor import get_all_processes, get_system_boot_info, get_pr
 from modules.net_monitor import get_all_connections, get_network_summary, run_traceroute
 from modules.sys_diag import generate_text_report, generate_csv_report, generate_json_report
 from modules.ai_analyzer import get_analyzer
+from modules.net_monitor import configure_geo_risk
+from modules.audit import log_event
 
 VERSION = 'linmon v1.0 (Linux Edition)'
+
+
+def _confirm_ai_send(analyzer, processes, connections, force=False):
+    """在把数据发往外部 LLM 前，显式展示将发送的内容并请求确认。
+    返回 True 表示允许发送。force=True（--yes）跳过交互确认。"""
+    if force:
+        return True
+    preview = analyzer.preview_send(processes, connections)
+    if not preview['allowed']:
+        print('[提示] 外部AI分析已禁用(allow_external_ai=false)，不会向任何第三方发送数据。')
+        return False
+    if not preview['will_send']:
+        return True  # 无可疑项，generate_security_report 仅返回"安全"结论，不外发
+    print('[!] 即将把以下数据外发至第三方 AI 端点进行分析:')
+    print(f'    端点: {preview["endpoint"]}')
+    print(f'    进程数: {preview["process_count"]}   连接数: {preview["connection_count"]}')
+    print(f'    命令行脱敏: {"是" if preview["redact"] else "否(配置关闭)"}')
+    print(f'    发送字段: {", ".join(preview["fields"])}')
+    if not sys.stdin.isatty():
+        print('[错误] 非交互环境未确认，已中止外发。可加 --yes 跳过确认。')
+        return False
+    ans = input('确认外发? [y/N] ').strip().lower()
+    return ans in ('y', 'yes')
 
 
 def check_dependencies():
@@ -111,6 +138,8 @@ def cmd_proc(args):
         analyzer = get_analyzer()
         if not analyzer.is_enabled():
             print('[提示] AI分析未启用, 请先配置: linmon ai-config --set app_key=你的AppKey --enable')
+        elif not _confirm_ai_send(analyzer, processes, [], args.yes):
+            print('[AI] 已取消外发')
         else:
             print('[AI] 正在分析高危进程...')
             risky = [p for p in processes if p['is_risky'] or p['risk_level'] in ('high', 'medium')]
@@ -195,6 +224,8 @@ def cmd_net(args):
         analyzer = get_analyzer()
         if not analyzer.is_enabled():
             print('[提示] AI分析未启用, 请先配置: linmon ai-config --set app_key=你的AppKey --enable')
+        elif not _confirm_ai_send(analyzer, [], connections, args.yes):
+            print('[AI] 已取消外发')
         else:
             print('[AI] 正在分析可疑连接...')
             risky = [c for c in connections if c['risk_level'] in ('high', 'medium')]
@@ -233,10 +264,13 @@ def cmd_diag(args):
         if not analyzer.is_enabled():
             print('[提示] AI分析未启用, 请配置config/ai_config.json')
         else:
-            print('[AI] 正在进行AI安全分析...')
             processes = get_all_processes()
             connections = get_all_connections(qqwry_path=qqwry)
-            ai_report = analyzer.generate_security_report(processes, connections)
+            if _confirm_ai_send(analyzer, processes, connections, args.yes):
+                print('[AI] 正在进行AI安全分析...')
+                ai_report = analyzer.generate_security_report(processes, connections)
+            else:
+                print('[AI] 已取消外发')
 
     report, data = generate_text_report(qqwry_path=qqwry, ai_report=ai_report)
     print(report)
@@ -244,10 +278,12 @@ def cmd_diag(args):
     if args.output:
         with open(args.output, 'w', encoding='utf-8') as f:
             f.write(report)
+        log_event('report_export', f'format=text path={args.output}')
         print(f'\n已保存报告: {args.output}')
 
     if args.csv:
         generate_csv_report(data['processes'], data['connections'], args.csv)
+        log_event('report_export', f'format=csv path={args.csv}')
         print(f'已保存CSV: {args.csv}')
 
     if args.json:
@@ -257,6 +293,7 @@ def cmd_diag(args):
         )
         with open(args.json, 'w', encoding='utf-8') as f:
             f.write(json_data)
+        log_event('report_export', f'format=json path={args.json}')
         print(f'已保存JSON: {args.json}')
 
 
@@ -363,6 +400,7 @@ def main():
     p_proc.add_argument('--no-network', action='store_true', help='跳过网络扫描')
     p_proc.add_argument('--no-schedule', action='store_true', help='跳过定时任务扫描')
     p_proc.add_argument('--ai', action='store_true', help='启用AI安全分析')
+    p_proc.add_argument('--yes', action='store_true', help='跳过AI外发确认(非交互/自动化使用)')
     p_proc.add_argument('-o', '--output', help='保存CSV到指定路径')
 
     # net
@@ -370,11 +408,13 @@ def main():
     p_net.add_argument('--all', action='store_true', help='包含内部连接')
     p_net.add_argument('--os', action='store_true', help='探测对端操作系统(TTL指纹,较慢)')
     p_net.add_argument('--ai', action='store_true', help='启用AI安全分析')
+    p_net.add_argument('--yes', action='store_true', help='跳过AI外发确认(非交互/自动化使用)')
     p_net.add_argument('-o', '--output', help='保存CSV到指定路径')
 
     # diag
     p_diag = subparsers.add_parser('diag', help='系统全面诊断')
     p_diag.add_argument('--ai', action='store_true', help='启用AI安全分析')
+    p_diag.add_argument('--yes', action='store_true', help='跳过AI外发确认(非交互/自动化使用)')
     p_diag.add_argument('-o', '--output', help='保存文本报告')
     p_diag.add_argument('--csv', help='保存CSV报告')
     p_diag.add_argument('--json', help='保存JSON报告')
@@ -388,8 +428,8 @@ def main():
 
     # web
     p_web = subparsers.add_parser('web', help='启动Web监控服务')
-    p_web.add_argument('--host', default='0.0.0.0', help='监听地址(默认0.0.0.0)')
-    p_web.add_argument('--port', type=int, default=8765, help='监听端口(默认8765)')
+    p_web.add_argument('--host', default=None, help='监听地址(默认读取 web_config.json，未配置则 127.0.0.1)')
+    p_web.add_argument('--port', type=int, default=None, help='监听端口(默认读取 web_config.json，未配置则 8765)')
     p_web.add_argument('--debug', action='store_true', help='调试模式')
 
     # ai-config
@@ -405,6 +445,14 @@ def main():
     if not args.command:
         parser.print_help()
         return
+
+    # 将 AI 配置中的地理高风险规则注入网络监控（仅本地规则，默认关闭）
+    try:
+        _a = get_analyzer()
+        configure_geo_risk(_a.config.get('geo_risk_enabled', False),
+                           _a.config.get('high_risk_regions', []))
+    except Exception:
+        pass
 
     if not check_dependencies():
         sys.exit(1)

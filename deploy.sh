@@ -235,7 +235,14 @@ else
     # 数据文件
     if [ -d "$SCRIPT_DIR/data" ]; then
         cp -r "$SCRIPT_DIR/data" "$INSTALL_DIR/"
-        info "数据文件已复制 (qqwry.dat/echarts/world.json)"
+        # qqwry.dat 为第三方授权数据(纯真IP库)，不随项目再分发；若本地存在则一并复制，
+        # 但部署包不应包含它，需使用者自行获取授权后放置于 <INSTALL_DIR>/data/qqwry.dat
+        if [ -f "$INSTALL_DIR/data/qqwry.dat" ]; then
+            warn "已复制本地 qqwry.dat（第三方授权数据，分发给他人前请确认已获纯真IP库授权）"
+        else
+            warn "未包含 qqwry.dat：IP归属地查询将不可用（请自行获取授权后放置于 $INSTALL_DIR/data/qqwry.dat）"
+        fi
+        info "数据文件已复制 (echarts/world.json)"
     else
         warn "data/ 目录未找到, IP归属地等功能将不可用"
     fi
@@ -256,10 +263,26 @@ else
     "temperature": 0.3,
     "timeout": 60,
     "enabled": false,
-    "auto_analyze_risky": true
+    "allow_external_ai": true,
+    "redact_sensitive": true,
+    "send_internal_ips": false,
+    "send_listening_ports": false,
+    "geo_risk_enabled": false,
+    "high_risk_regions": []
 }
 CONF
     fi
+    # Web 面板配置（默认仅本机监听 + 令牌鉴权，令牌启动时自动生成）
+    cat > "$INSTALL_DIR/config/web_config.json" <<'CONF'
+{
+    "host": "127.0.0.1",
+    "port": 8765,
+    "auth_enabled": true,
+    "auth_token": ""
+}
+CONF
+    # 含密钥的配置文件限定为 0600
+    chmod 600 "$INSTALL_DIR/config/ai_config.json" "$INSTALL_DIR/config/web_config.json" 2>/dev/null || true
 
     # 清理 __pycache__
     find "$INSTALL_DIR" -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
@@ -299,6 +322,20 @@ EOF
 chmod +x "$WEBMON_BIN"
 
 info "启动脚本已创建"
+
+# ---------- Step 8: 安装 systemd 单元（仅系统级安装且存在 systemctl 时） ----------
+if [ "$USER_INSTALL" = false ] && command -v systemctl &>/dev/null; then
+    UNIT_SRC="$SCRIPT_DIR/systemd/linmon-web.service"
+    if [ -f "$UNIT_SRC" ]; then
+        UNIT_DST="/etc/systemd/system/linmon-web.service"
+        sed -e "s#^WorkingDirectory=.*#WorkingDirectory=$INSTALL_DIR#" \
+            -e "s#^ExecStart=.*#ExecStart=$INSTALL_DIR/linmon-web#" \
+            "$UNIT_SRC" > "$UNIT_DST"
+        systemctl daemon-reload 2>/dev/null || true
+        info "已安装 systemd 单元: $UNIT_DST (systemctl start linmon-web 启动)"
+        warn "请将 $UNIT_DST 的 User 改为专用低权限用户，并确认 web_config.json 已启用鉴权"
+    fi
+fi
 
 # ---------- 创建符号链接 ----------
 if [ "$USER_INSTALL" = false ]; then
