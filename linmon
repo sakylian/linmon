@@ -1,0 +1,8 @@
+#!/bin/bash
+# linmon 命令包装脚本
+cd "$(dirname "$0")"
+if [ -f venv/bin/python3 ]; then
+    exec venv/bin/python3 linmon.py "$@"
+else
+    exec python3 linmon.py "$@"
+fi
