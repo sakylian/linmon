@@ -1,2 +1,210 @@
-# linmon
-Monitor linux system processes and network active links.
+---
+AIGC:
+  ContentProducer: '001191110102MAD55U9H0F10002'
+  ContentPropagator: '001191110102MAD55U9H0F10002'
+  Label: '1'
+  ProduceID: '8ecb034d-5c54-4ec8-b0ae-5072de1f6612'
+  PropagateID: '8ecb034d-5c54-4ec8-b0ae-5072de1f6612'
+  ReservedCode1: '1d6bc0cc-afa6-4ab9-9f7b-87d28c80123f'
+  ReservedCode2: '1d6bc0cc-afa6-4ab9-9f7b-87d28c80123f'
+---
+
+# linmon — Linux 进程与网络连接安全监控工具
+
+轻量级 Linux 安全监控工具，提供命令行和 Web 面板两种使用方式。实时采集系统进程、网络连接信息，结合本地规则引擎和可选的 AI 分析，帮助快速发现可疑进程、异常网络外连等安全隐患。
+
+## 功能特性
+
+- **进程监控**：扫描全部进程，识别高危/可疑进程（可疑路径、异常用户、伪装进程名等），关联定时任务（cron / systemd timer / rc.local / init.d）、网络连接、祖先链和子进程
+- **网络连接监控**：列出所有活跃网络连接，按协议/端口识别服务类型，查询 IP 归属地（纯真 IP 库），通过 TTL 指纹推断对端操作系统，评估连接风险等级
+- **地理分布地图**：Web 面板内置 ECharts 世界地图，公网连接按风险等级以红/黄/绿散点标注，支持缩放拖拽和悬浮查看详情
+- **路由跟踪**：逐跳显示路由路径及每跳的 IP 归属地，可选 AI 分析路由安全性
+- **AI 安全分析**：接入大语言模型，对高危进程、可疑连接生成结构化安全分析报告，给出风险评级和处置建议
+- **Web 监控面板**：实时刷新的仪表盘界面，支持表头排序、自动刷新、一键复制 kill 命令、AI 分析弹窗
+- **多发行版适配**：自动检测 Debian / RHEL / Arch / SUSE 系发行版，适配不同的包管理器和服务管理器
+
+## 截图
+
+Web 面板包含五个页面：
+
+| 页面 | 说明 |
+|------|------|
+| 概览 | 系统信息卡片 + 进程类别分布 + 网络方向分布 |
+| 进程监控 | 进程列表，表头可排序，点击展开详情，支持 AI 分析和一键 kill |
+| 网络连接 | 连接列表 + 世界地图地理分布，表头可排序，支持 AI 分析 |
+| 路由跟踪 | 输入目标 IP/域名，逐跳显示路由和归属地 |
+| AI 分析 | 综合安全报告，可查看高危统计、配置和测试 AI 连接 |
+
+## 快速开始
+
+### 方式一：一键部署脚本
+
+```bash
+# 系统级安装到 /opt/linmon（需 sudo）
+sudo ./deploy.sh
+
+# 或用户级安装到 ~/linmon（无需 sudo）
+./deploy.sh --user
+```
+
+安装完成后直接使用：
+
+```bash
+linmon boot              # 查看开机信息
+linmon proc              # 进程监控
+linmon net               # 网络连接监控
+linmon diag              # 系统全面诊断
+linmon trace 8.8.8.8     # 路由跟踪
+linmon-web               # 启动 Web 监控面板
+```
+
+### 方式二：手动安装
+
+```bash
+# 1. 克隆仓库
+git clone git@github.com:sakylian/linmon.git
+cd linmon
+
+# 2. 创建虚拟环境并安装依赖
+python3 -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
+
+# 3. 运行
+python linmon.py proc          # 命令行模式
+python webserver.py            # Web 模式，访问 http://localhost:8765
+```
+
+### 系统依赖
+
+- Python >= 3.8
+- `iproute2`（提供 `ss` 命令，网络连接扫描依赖）
+- `traceroute`（路由跟踪功能依赖）
+
+Debian / Ubuntu：
+```bash
+sudo apt install python3 python3-pip iproute2 traceroute net-tools
+```
+
+RHEL / CentOS / Rocky：
+```bash
+sudo dnf install python3 python3-pip iproute traceroute net-tools
+```
+
+## 命令行用法
+
+```bash
+linmon <子命令> [选项]
+```
+
+| 子命令 | 说明 | 常用选项 |
+|--------|------|----------|
+| `boot` | 显示开机信息 | — |
+| `proc` | 进程监控 | `--all` 显示所有进程 / `--ai` AI分析 / `-o file.csv` 导出 |
+| `net` | 网络连接监控 | `--all` 包含内部连接 / `--os` 探测对端OS / `--ai` AI分析 / `-o file.csv` 导出 |
+| `diag` | 系统全面诊断 | `--ai` AI分析 / `-o report.txt` / `--csv data.csv` / `--json data.json` |
+| `trace` | 路由跟踪 | `--hops 30` / `--timeout 5` / `--ai` |
+| `web` | 启动Web服务 | `--host 0.0.0.0` / `--port 8765` / `--debug` |
+| `ai-config` | AI配置管理 | `--show` / `--set key=val` / `--enable` / `--disable` / `--test` |
+
+### 使用示例
+
+```bash
+# 只看高危进程
+linmon proc
+
+# 查看所有进程并导出 CSV
+linmon proc --all -o processes.csv
+
+# 网络监控 + 探测对端OS + AI分析
+linmon net --os --ai
+
+# 生成完整诊断报告（含AI分析）
+linmon diag --ai -o report.txt --csv data.csv
+
+# 路由跟踪到 Google DNS
+linmon trace 8.8.8.8 --ai
+```
+
+## AI 分析配置
+
+AI 分析为可选功能，默认关闭。配置后可对高危进程和可疑连接生成专业的安全分析报告。
+
+```bash
+# 设置 API 密钥
+linmon ai-config --set app_key=你的AppKey
+
+# 启用
+linmon ai-config --enable
+
+# 测试连接
+linmon ai-config --test
+
+# 查看配置
+linmon ai-config --show
+```
+
+也可以直接编辑配置文件 `config/ai_config.json`，或通过 Web 面板的「AI 配置」按钮在线修改。
+
+## Web 面板
+
+```bash
+python webserver.py
+# 或
+linmon-web
+```
+
+启动后访问 `http://localhost:8765`。
+
+功能：
+- 概览页实时展示系统状态卡片
+- 进程表和网络表支持点击表头排序、自动定时刷新
+- 网络连接页内置世界地图，公网连接按风险等级标注地理位置
+- 每行进程支持 AI 分析和一键复制 kill 命令
+- 路由跟踪可视化展示
+
+## 项目结构
+
+```
+linmon/
+├── linmon.py              # CLI 统一入口
+├── webserver.py           # Flask Web 服务
+├── deploy.sh              # 一键部署脚本
+├── requirements.txt       # Python 依赖
+├── .gitignore
+├── config/
+│   └── ai_config.json     # AI 配置（含密钥，已 gitignore）
+├── data/
+│   ├── qqwry.dat          # 纯真 IP 归属地数据库
+│   ├── echarts.min.js     # ECharts 图表库（地图）
+│   └── world.json         # 世界地图 GeoJSON
+├── templates/
+│   └── index.html         # Web 面板前端（单文件）
+└── modules/
+    ├── proc_monitor.py    # 进程监控模块
+    ├── net_monitor.py     # 网络连接监控模块
+    ├── geo_locator.py     # IP 归属地查询 + 坐标映射
+    ├── ai_analyzer.py     # AI 安全分析模块
+    ├── distro_helper.py   # 发行版适配模块
+    └── sys_diag.py        # 系统诊断报告生成
+```
+
+## 技术栈
+
+- **后端**：Python 3 / Flask / psutil
+- **前端**：原生 HTML+JS+CSS（单文件） / ECharts（世界地图）
+- **IP 归属地**：纯真 IP 数据库（qqwry.dat）
+- **AI 分析**：兼容 OpenAI API 格式的大语言模型
+
+## 支持的 Linux 发行版
+
+- Debian / Ubuntu / LinuxMint / Kali / Raspbian
+- RHEL / CentOS / Rocky / AlmaLinux / Fedora
+- Arch / Manjaro
+- openSUSE / SLES
+
+## License
+
+MIT
+
+> AI生成
