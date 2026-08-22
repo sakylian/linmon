@@ -788,8 +788,11 @@ let _worldJsonLoaded = false;
 let _homeCoord = [104.0, 35.0]; // 本机(连线源点)坐标，由后端 home_coord 提供
 let _homeGeoStr = '本机';
 let _lastMapPoints = []; // 保存最近一次绘制的散点数据，供复位使用
+let _lastMapLines = []; // 保存最近一次绘制的连线数据，供叠加路由跳点重绘使用
 let _lastMapRawConns = null; // 保存原始连接数据，供复位重建使用
 let _mapCollapsed = false; // 地图是否已收起
+let _activeHopPath = null; // 当前在地图上叠加显示的路由跳点路径（点击连接时生成）
+let _hopPathRemote = null; // 已绘制跳点路径对应的 remote_ip:port，避免重复追踪
 
 function _getFlowColor(sent, recv) {
   sent = sent || 0;
@@ -992,6 +995,56 @@ function _drawNetMap(points, lines) {
     ]
   };
   _lastMapPoints = points;
+  _lastMapLines = lines;
+
+  // 叠加路由跳点路径：在主连线基础上，用带序号的小弧线展示数据如何逐跳建立
+  if (_activeHopPath && _activeHopPath.path && _activeHopPath.path.length >= 2) {
+    const p = _activeHopPath.path;
+    const hopLines = [];
+    for (let k = 0; k < p.length - 1; k++) {
+      hopLines.push({
+        coords: [p[k].coord, p[k + 1].coord],
+        lineStyle: { width: 1.4, color: '#bc8cff', opacity: 0.85, curveness: 0.25 }
+      });
+    }
+    option.series.push({
+      name: '路由跳点连线',
+      type: 'lines',
+      coordinateSystem: 'geo',
+      zlevel: 4,
+      effect: { show: true, period: 4, trailLength: 0.2, symbol: 'arrow', symbolSize: 3, color: '#bc8cff' },
+      lineStyle: { color: '#bc8cff', width: 1.4, opacity: 0.85, curveness: 0.25 },
+      data: hopLines
+    });
+    const hopNodes = p.map(function(node) {
+      const isHome = node.hop === 0;
+      let tip = '<div style="font-weight:600">跳 ' + node.hop + (isHome ? '（本机）' : '') + '</div>';
+      if (node.ip && node.ip !== '*') tip += '<div style="font-size:11px">' + _esc(node.ip) + '</div>';
+      if (node.hostname) tip += '<div style="font-size:11px;color:#8b949e">' + _esc(node.hostname) + '</div>';
+      if (node.rtt != null) tip += '<div style="font-size:11px;color:#8b949e">' + node.rtt + ' ms</div>';
+      return {
+        name: isHome ? '本机' : ('跳' + node.hop),
+        value: [node.coord[0], node.coord[1], 1],
+        symbolSize: isHome ? 12 : 7,
+        itemStyle: { color: isHome ? '#f0b400' : '#bc8cff' },
+        label: {
+          show: true, formatter: String(node.hop), position: 'right',
+          color: '#bc8cff', fontSize: 10, backgroundColor: '#161b22',
+          padding: [1, 3], borderRadius: 3
+        },
+        tooltipHtml: tip
+      };
+    });
+    option.series.push({
+      name: '路由跳点',
+      type: 'effectScatter',
+      coordinateSystem: 'geo',
+      zlevel: 5,
+      rippleEffect: { brushType: 'stroke', scale: 2 },
+      data: hopNodes
+    });
+  }
+
   _netMapChart.setOption(option, true);
 }
 
@@ -1015,6 +1068,8 @@ function mapResetView() {
   _netMapChart.dispose();
   _netMapChart = null;
   _worldJsonLoaded = false; // 强制重新注册地图
+  _activeHopPath = null;    // 复位时清除跳点叠加
+  _hopPathRemote = null;
   if (_lastMapRawConns) {
     renderNetMap(_lastMapRawConns);
   }
@@ -1040,11 +1095,51 @@ function toggleMap() {
 function _onMapClick(params) {
   if (!params || !params.data) return;
   const d = params.data;
-  if (d.name === '本机') { showHomeAnalysis(); return; }
+  if (d.name === '本机') { _clearHopPath(); showHomeAnalysis(); return; }
   if (d.conns && d.conns.length) {
     const geoStr = (d.conns[0].geo && d.conns[0].geo.geo_str) || '未知位置';
+    const rip = d.conns[0].remote_ip;
+    const rport = d.conns[0].remote_port || 0;
     showConnAnalysis(d.conns, geoStr);
+    loadHopPath(rip, rport); // 同时追踪路由并在地图上叠加跳点路径
   }
+}
+
+// 重新绘制地图（保留当前连线数据，叠加/清除跳点路径）
+function _redrawMap() {
+  if (_netMapChart) _drawNetMap(_lastMapPoints, _lastMapLines);
+}
+
+// 清除地图上的路由跳点叠加
+function _clearHopPath() {
+  if (_activeHopPath) {
+    _activeHopPath = null;
+    _hopPathRemote = null;
+    _redrawMap();
+  }
+}
+
+// 点击连接时，按 remote_ip 追踪路由，构建带序号的跳点路径叠加到地图
+function loadHopPath(remote_ip, remote_port) {
+  const key = remote_ip + ':' + remote_port;
+  if (_hopPathRemote === key && _activeHopPath) return Promise.resolve(); // 已绘制，避免重复追踪
+  return fetch(API + '/api/traceroute', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ target: remote_ip, hops: 15, timeout: 2 })
+  }).then(function(r) { return r.json(); }).then(function(res) {
+    if (res.error || !res.hops) return;
+    const path = [{ coord: _homeCoord, hop: 0, label: '本机', ip: _homeGeoStr }];
+    let prev = _homeCoord;
+    (res.hops || []).forEach(function(h) {
+      const c = (h.geo && h.geo.lng) ? [h.geo.lng, h.geo.lat] : prev; // 无 geo（私网/内网）沿用上一点
+      path.push({ coord: c, hop: h.hop, ip: h.ip, hostname: h.hostname, rtt: h.rtt_ms });
+      prev = c;
+    });
+    _activeHopPath = { remote: remote_ip, path: path };
+    _hopPathRemote = key;
+    _redrawMap();
+  }).catch(function() {});
 }
 
 function _esc(s) {
@@ -1125,6 +1220,11 @@ function showConnAnalysis(conns, geoStr) {
         cmdline +
         '<div class="kv" style="margin-top:8px"><span class="k">风险研判</span></div>' +
         reasons +
+        '<div style="margin-top:8px;display:flex;gap:8px;align-items:center">' +
+          '<button class="btn" onclick="captureConn(\'' + c.remote_ip + '\',' + (c.remote_port || 0) + ',' + i + ')">抓包分析此连接</button>' +
+          '<span id="cap-status-' + i + '" style="font-size:11px;color:#8b949e"></span>' +
+        '</div>' +
+        '<div id="cap-box-' + i + '" style="margin-top:6px"></div>' +
       '</div>' +
     '</div>';
   });
@@ -1161,6 +1261,61 @@ function showHomeAnalysis() {
 
 function closeConnModal() {
   document.getElementById('conn-modal-overlay').classList.remove('show');
+  _clearHopPath(); // 关闭弹窗时同步清除地图上的跳点叠加
+}
+
+// 对单个连接发起本地抓包分析（不对外发送数据）
+async function captureConn(ip, port, idx) {
+  const box = document.getElementById('cap-box-' + idx);
+  const status = document.getElementById('cap-status-' + idx);
+  if (status) status.textContent = '正在抓包（最多8秒）…';
+  if (box) box.innerHTML = '<div style="color:#8b949e;font-size:12px">正在抓包分析 ' + _esc(ip) + ':' + port + ' …</div>';
+  try {
+    const res = await fetch(API + '/api/capture', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ remote_ip: ip, remote_port: port, count: 60, timeout: 8 })
+    });
+    const data = await res.json();
+    if (status) status.textContent = '';
+    if (box) box.innerHTML = renderCapture(data);
+  } catch (e) {
+    if (status) status.textContent = '';
+    if (box) box.innerHTML = '<div style="color:#f85149;font-size:12px">抓包失败: ' + _esc(e) + '</div>';
+  }
+}
+
+// 渲染抓包结果
+function renderCapture(d) {
+  if (d.error) return '<div style="color:#f85149;font-size:12px">' + _esc(d.error) + '</div>';
+  let h = '<div class="analysis-summary" style="grid-template-columns:repeat(auto-fill,minmax(120px,1fr))">' +
+    _asCard('抓包数', d.count) +
+    _asCard('发送', _formatBytes(d.sent_bytes)) +
+    _asCard('接收', _formatBytes(d.recv_bytes)) +
+    _asCard('本机进程', (d.process && d.process.name) ? d.process.name : '—') +
+    '</div>';
+  if (d.process && d.process.pid) {
+    h += '<div class="kv"><span class="k">PID / 命令行</span><span class="val">' + d.process.pid +
+      ' / ' + _esc(d.process.cmdline || '—') + '</span></div>';
+  }
+  if (d.note) h += '<div style="font-size:11px;color:#8b949e;margin:4px 0">' + _esc(d.note) + '</div>';
+  h += '<div style="font-size:12px;color:#8b949e;margin:6px 0 4px">数据包（本地抓包，未对外发送）：</div>';
+  h += '<div style="max-height:240px;overflow-y:auto;font-family:ui-monospace,Menlo,Consolas,monospace;font-size:11px;background:#0d1117;border:1px solid #30363d;border-radius:4px;padding:6px">';
+  if (!d.packets || !d.packets.length) {
+    h += '<div style="color:#8b949e">该连接当前无流量（连接可能空闲）</div>';
+  } else {
+    d.packets.slice(0, 60).forEach(function(p) {
+      h += '<div style="margin:2px 0">' +
+        '<span style="color:#8b949e">' + _esc(p.time || '') + '</span> ' +
+        '<span style="' + (p.dir === 'sent' ? 'color:#f85149' : 'color:#3fb950') + '">' +
+          (p.dir === 'sent' ? '→发' : (p.dir === 'recv' ? '←收' : '↔')) + '</span> ' +
+        _esc(p.src) + ':' + (p.sport || '') + ' → ' + _esc(p.dst) + ':' + (p.dport || '') + ' ' +
+        '[' + _esc(p.flags || '') + '] len=' + (p.len || 0) +
+        (p.payload_preview ? '<br>&nbsp;&nbsp;' + _esc(p.payload_preview) : '') + '</div>';
+    });
+  }
+  h += '</div>';
+  return h;
 }
 
 function _formatBytes(bytes) {

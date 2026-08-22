@@ -697,52 +697,205 @@ def run_traceroute(target, max_hops=30, timeout=5):
     import re
     for line in output.split('\n'):
         line = line.strip()
-        if not line or line.startswith('traceroute'):
+        if not line:
+            continue
+        # 跳过表头/汇总行：traceroute 头、tracepath 的 pmtu / Too many hops / Resume
+        if line.startswith('traceroute') or line.startswith('Too many hops') \
+           or line.startswith('Resume:') or line.startswith('pmtu'):
             continue
 
-        # traceroute 输出格式: 1  192.168.1.1 (192.168.1.1)  0.5ms  0.4ms  0.3ms
-        # mtr 输出格式: 1|--192.168.1.1  0.0  0.0  0.0
-        parts = re.split(r'\s+', line)
+        # 跳号：traceroute/mtr 为行首纯数字；tracepath 为 "1:" 或 "1?:"
+        m = re.match(r'^\s*(\d+)\??:\s*(.*)$', line)
+        if not m:
+            continue
+        hop_num = int(m.group(1))
+        rest = m.group(2)
 
-        hop_num = None
+        # tracepath 的 "no reply" 跳：仍记录一跳，便于展示路径长度
+        if 'no reply' in rest:
+            hops.append({'hop': hop_num, 'ip': '*', 'hostname': '', 'rtt_ms': None, 'geo': None})
+            continue
+
+        # IP：优先 (1.2.3.4) 形式，否则裸 IP（tracepath 经常只给裸 IP）
         ip_addr = None
-        rtt = None
+        ipm = re.search(r'\(([\d.]+)\)', rest) or re.search(r'\(([\da-fA-F:]+)\)', rest)
+        if ipm:
+            ip_addr = ipm.group(1)
+        else:
+            bare = re.search(r'\b(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})\b', rest)
+            if bare:
+                ip_addr = bare.group(1)
+
+        # 主机名：括号内 IP 前的文本，否则取首个非 rtt 词
         hostname = ''
+        if ipm:
+            hostname = rest[:rest.index(ipm.group(0))].strip()
+        else:
+            toks = rest.split()
+            if toks and not re.match(r'\d+\.?\d*ms', toks[0]):
+                hostname = toks[0]
 
-        try:
-            # 标准traceroute格式
-            if parts[0].isdigit():
-                hop_num = int(parts[0])
-                idx = 1
-                # 跳过空字段
-                while idx < len(parts) and not parts[idx]:
-                    idx += 1
-                if idx < len(parts):
-                    ip_or_name = parts[idx]
-                    ip_match = re.search(r'\(([\d.]+)\)', line) or re.search(r'\(([\da-fA-F:]+)\)', line)
-                    if ip_match:
-                        ip_addr = ip_match.group(1)
-                        hostname = ip_or_name if ip_or_name != f'({ip_addr})' else ''
-                    elif re.match(r'^\d+\.\d+\.\d+\.\d+$', ip_or_name):
-                        ip_addr = ip_or_name
-                    idx += 1
-                    rtt_match = re.search(r'(\d+\.?\d*)\s*ms', line)
-                    if rtt_match:
-                        rtt = float(rtt_match.group(1))
-        except (ValueError, IndexError):
-            pass
+        rttm = re.search(r'(\d+\.?\d*)\s*ms', rest)
+        rtt = float(rttm.group(1)) if rttm else None
 
-        if hop_num is not None:
-            # IP 归属地
-            geo = None
-            if ip_addr and is_valid_public_ip(ip_addr):
-                geo = GeoLocator.lookup_ip(ip_addr)
-            hops.append({
-                'hop': hop_num,
-                'ip': ip_addr or '*',
-                'hostname': hostname,
-                'rtt_ms': rtt,
-                'geo': geo,
-            })
+        # IP 归属地
+        geo = None
+        if ip_addr and is_valid_public_ip(ip_addr):
+            geo = GeoLocator.lookup_ip(ip_addr)
+
+        hops.append({
+            'hop': hop_num,
+            'ip': ip_addr or '*',
+            'hostname': hostname,
+            'rtt_ms': rtt,
+            'geo': geo,
+        })
 
     return {'target': target, 'hops': hops}
+
+
+def _get_local_ip_addrs():
+    """获取本机所有 IPv4 接口地址，用于判定抓包方向（发送/接收）"""
+    import socket, fcntl, struct, os
+    ips = set()
+    try:
+        for iface in os.listdir('/sys/class/net'):
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            try:
+                info = fcntl.ioctl(s.fileno(), 0x8915, struct.pack('256s', iface[:15].encode()))
+                ips.add(socket.inet_ntoa(info[20:24]))
+            except Exception:
+                pass
+            finally:
+                s.close()
+    except Exception:
+        pass
+    return ips
+
+
+def capture_traffic(remote_ip, remote_port=None, iface='any', count=60, timeout=8):
+    """对指定远端 IP/端口抓包并做本地分析（不对外发送任何数据）。
+
+    返回数据包级摘要：时间、源/目的、端口、TCP 标志、长度、方向、载荷预览，
+    并汇总发送/接收字节与包数，按本地端口关联当前连接解析出对应进程。
+    """
+    import shutil as sh, subprocess as sp, re as _re
+
+    if not (is_valid_public_ip(remote_ip) or is_private_ip(remote_ip)):
+        return {'error': '无效的 IP 地址'}
+
+    if sh.which('tcpdump'):
+        tool = 'tcpdump'
+    elif sh.which('tshark'):
+        tool = 'tshark'
+    else:
+        return {'error': '未找到 tcpdump/tshark，请安装: sudo apt install tcpdump'}
+
+    filt = 'host %s' % remote_ip
+    if remote_port:
+        filt += ' and port %d' % int(remote_port)
+    if tool == 'tcpdump':
+        # -n 不解析名称, -tttt 时间戳, -A 输出 ASCII 载荷预览, -s 0 全量, -c count 达到即退出
+        cmd = ['tcpdump', '-i', iface, '-n', '-tttt', '-A', '-s', '0', '-c', str(count), filt]
+    else:
+        cmd = ['tshark', '-i', iface, '-c', str(count), '-f', filt]
+
+    try:
+        r = sp.run(cmd, capture_output=True, text=True, timeout=timeout + 20)
+    except sp.TimeoutExpired:
+        return {'error': '抓包超时（%ds），该连接当前可能无流量' % timeout}
+    except FileNotFoundError:
+        return {'error': '抓包命令不可用'}
+
+    out = (r.stdout or '') + '\n' + (r.stderr or '')
+    # 权限不足时给出明确提示
+    if ('permission' in out.lower() or 'not have permission' in out.lower() or 'could not' in out.lower()) \
+       and 'length' not in out:
+        return {'error': '抓包需要 root 权限，请用 sudo 运行 linmon 的 Web 服务'}
+
+    local_ips = _get_local_ip_addrs()
+    # tcpdump 摘要行: "时间戳 IP src.port > dst.port: Flags [..], ..., length N"
+    pkt_re = _re.compile(
+        r'IP6?\s+([\d.a-fA-F:]+)\.(\d+)\s+>\s+([\d.a-fA-F:]+)\.(\d+):\s+Flags\s+\[([^\]]+)\],.*?length\s+(\d+)'
+    )
+
+    packets = []
+    sent_bytes = recv_bytes = 0
+    sent_pkts = recv_pkts = 0
+    lines = out.split('\n')
+    cur = None
+    payload_buf = []
+
+    def flush():
+        nonlocal cur, payload_buf
+        if cur is not None:
+            raw = ''.join(payload_buf)
+            # 仅保留可打印字符，截断预览，避免乱码/敏感内容过长
+            preview = ''.join(ch if 32 <= ord(ch) < 127 else '.' for ch in raw)[:120].strip()
+            cur['payload_preview'] = preview
+            packets.append(cur)
+        cur = None
+        payload_buf = []
+
+    for ln in lines:
+        mm = pkt_re.search(ln)
+        if mm:
+            flush()
+            src, sport, dst, dport, flags, length = mm.groups()
+            length = int(length)
+            is_sent = src in local_ips
+            is_recv = dst in local_ips
+            ts = ln.split(' IP')[0].strip() if ' IP' in ln else ln.split(' IP6')[0].strip()
+            cur = {
+                'time': ts,
+                'src': src, 'sport': int(sport),
+                'dst': dst, 'dport': int(dport),
+                'flags': flags, 'len': length,
+                'dir': 'sent' if is_sent else ('recv' if is_recv else 'other'),
+            }
+            if is_sent:
+                sent_bytes += length; sent_pkts += 1
+            elif is_recv:
+                recv_bytes += length; recv_pkts += 1
+            payload_buf = []
+        elif cur is not None and ln.strip():
+            payload_buf.append(ln)
+    flush()
+
+    # 按本地端口关联当前连接，解析出对应进程
+    proc_map = {}
+    try:
+        for c in get_all_connections():
+            lp = c.get('local_port')
+            if lp:
+                proc_map[lp] = {
+                    'pid': c.get('pid'),
+                    'name': c.get('process'),
+                    'cmdline': c.get('process_cmdline'),
+                    'user': c.get('process_user'),
+                }
+    except Exception:
+        pass
+    process = None
+    for p in packets:
+        if p['dir'] == 'sent' and p['sport'] in proc_map:
+            process = proc_map[p['sport']]; break
+    if process is None:
+        for p in packets:
+            if p['dir'] == 'recv' and p['dport'] in proc_map:
+                process = proc_map[p['dport']]; break
+
+    return {
+        'target': '%s:%s' % (remote_ip, remote_port) if remote_port else remote_ip,
+        'tool': tool,
+        'count': len(packets),
+        'total_bytes': sent_bytes + recv_bytes,
+        'sent_bytes': sent_bytes,
+        'recv_bytes': recv_bytes,
+        'sent_packets': sent_pkts,
+        'recv_packets': recv_pkts,
+        'process': process,
+        'local_ips': sorted(local_ips),
+        'packets': packets,
+        'note': '本地抓包分析，数据仅在本机展示，未对外发送',
+    }

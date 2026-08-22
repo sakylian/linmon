@@ -21,7 +21,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from flask import Flask, request, jsonify, render_template, send_from_directory
 
 from modules.proc_monitor import get_all_processes, get_system_boot_info, get_process_summary
-from modules.net_monitor import get_all_connections, get_network_summary, run_traceroute, start_frequency_sampler, configure_geo_risk
+from modules.net_monitor import get_all_connections, get_network_summary, run_traceroute, capture_traffic, start_frequency_sampler, configure_geo_risk
 from modules.geo_locator import find_qqwry_dat, GeoLocator, is_valid_public_ip
 from modules.distro_helper import get_distro
 from modules.ai_analyzer import get_analyzer
@@ -273,6 +273,25 @@ def api_traceroute():
     timeout = int(data.get('timeout', 5))
 
     result = run_traceroute(target, max_hops=max_hops, timeout=timeout)
+    return jsonify(result)
+
+
+@app.route('/api/capture', methods=['POST'])
+def api_capture():
+    """对指定远端连接抓包并做本地分析（不对外发送数据）"""
+    data = request.get_json() or {}
+    remote_ip = (data.get('remote_ip') or '').strip()
+    if not remote_ip:
+        return jsonify({'error': '请提供 remote_ip 参数'}), 400
+    remote_port = int(data.get('remote_port') or 0)
+    count = int(data.get('count') or 60)
+    timeout = int(data.get('timeout') or 8)
+    result = capture_traffic(
+        remote_ip,
+        remote_port if remote_port else None,
+        count=count,
+        timeout=timeout,
+    )
     return jsonify(result)
 
 
