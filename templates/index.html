@@ -123,7 +123,10 @@ select:focus,input:focus{outline:none;border-color:#58a6ff}
 .net-map-section .map-header .legend{display:flex;gap:12px;font-size:11px;color:#8b949e}
 .net-map-section .map-header .legend span{display:flex;align-items:center;gap:4px}
 .net-map-section .map-header .legend .dot{width:8px;height:8px;border-radius:50%;display:inline-block}
-#net-map-chart{width:100%;height:480px;background:#0d1117}
+#net-map-chart{width:100%;height:480px;background:#0d1117;position:relative}
+.map-controls{position:absolute;top:12px;right:12px;display:flex;flex-direction:column;gap:6px;z-index:100}
+.map-controls .map-btn{width:36px;height:36px;background:#161b22;border:1px solid #30363d;border-radius:6px;color:#c9d1d9;cursor:pointer;font-size:16px;display:flex;align-items:center;justify-content:center;padding:0}
+.map-controls .map-btn:hover{background:#30363d;border-color:#58a6ff;color:#58a6ff}
 </style>
 </head>
 <body>
@@ -212,12 +215,18 @@ select:focus,input:focus{outline:none;border-color:#58a6ff}
     <div class="map-header">
       <h3>网络连接地理分布</h3>
       <div class="legend">
-        <span><span class="dot" style="background:#f85149"></span>高危</span>
-        <span><span class="dot" style="background:#d29922"></span>中危</span>
-        <span><span class="dot" style="background:#3fb950"></span>低危</span>
+        <span><span class="dot" style="background:#f85149"></span>主要外发（上传>接收）</span>
+        <span><span class="dot" style="background:#3fb950"></span>主要接收（接收>上传）</span>
+        <span><span class="dot" style="background:#58a6ff"></span>双向流量</span>
       </div>
     </div>
-    <div id="net-map-chart"></div>
+    <div id="net-map-chart">
+      <div class="map-controls">
+        <button class="map-btn" onclick="mapZoomIn()" title="放大">+</button>
+        <button class="map-btn" onclick="mapZoomOut()" title="缩小">-</button>
+        <button class="map-btn" onclick="mapResetCenter()" title="回到中心" style="font-size:14px">⊙</button>
+      </div>
+    </div>
   </div>
   <div class="scroll" id="net-table-container">
     <div class="loading">点击"刷新"加载数据...</div>
@@ -678,6 +687,17 @@ function sortByNet(key) {
 // ====== 网络连接地理地图 ======
 let _netMapChart = null;
 let _worldJsonLoaded = false;
+let _homeCoord = [104.0, 35.0]; // 默认中国中心，首次加载数据后自动更新
+
+function _getFlowColor(sent, recv) {
+  sent = sent || 0;
+  recv = recv || 0;
+  if (sent === 0 && recv === 0) return '#8b949e'; // 无数据，灰色
+  var ratio = sent / (sent + recv);
+  if (ratio > 0.6) return '#f85149'; // 主要外发 → 红色
+  if (ratio < 0.4) return '#3fb950'; // 主要接收 → 绿色
+  return '#58a6ff'; // 双向流量 → 蓝色
+}
 
 function renderNetMap(conns) {
   const chartDom = document.getElementById('net-map-chart');
@@ -686,39 +706,66 @@ function renderNetMap(conns) {
   // 收集有坐标的公网连接
   const points = [];
   const seenCoords = {};
-  (conns || []).forEach(c => {
+  (conns || []).forEach(function(c) {
     const lng = c.geo && c.geo.lng;
     const lat = c.geo && c.geo.lat;
     if (lng && lat) {
-      const key = lng + ',' + lat;
-      if (!seenCoords[key]) {
-        seenCoords[key] = true;
-        const color = c.risk_level==='high' ? '#f85149' : c.risk_level==='medium' ? '#d29922' : '#3fb950';
-        points.push({
-          name: `${c.remote_ip}:${c.remote_port} | ${c.geo.geo_str} | ${c.process||'?'}`,
-          value: [lng, lat, 1],
-          itemStyle: { color: color }
-        });
-      } else {
-        // 同坐标的点累加
-        const existing = points.find(p => p.value[0]===lng && p.value[1]===lat);
-        if (existing) existing.value[2]++;
+      // 用第一条有坐标的连接推断本机位置
+      if (_homeCoord[0] === 104.0 && _homeCoord[1] === 35.0) {
+        _homeCoord = [lng, lat];
       }
+      const key = lng + ',' + lat;
+      const sent = c.bytes_sent || 0;
+      const recv = c.bytes_recv || 0;
+      const color = _getFlowColor(sent, recv);
+      if (!seenCoords[key]) {
+        seenCoords[key] = { sent: 0, recv: 0, count: 0, items: [] };
+      }
+      seenCoords[key].sent += sent;
+      seenCoords[key].recv += recv;
+      seenCoords[key].count++;
+      seenCoords[key].items.push(c);
     }
+  });
+
+  // 按坐标聚合点
+  Object.keys(seenCoords).forEach(function(key) {
+    const parts = key.split(',');
+    const lng = parseFloat(parts[0]);
+    const lat = parseFloat(parts[1]);
+    const agg = seenCoords[key];
+    const color = _getFlowColor(agg.sent, agg.recv);
+    const sentStr = _formatBytes(agg.sent);
+    const recvStr = _formatBytes(agg.recv);
+    // 取第一个连接的信息做展示
+    const first = agg.items[0];
+    let tooltip = '<div style="font-weight:600;margin-bottom:4px">' + first.geo.geo_str + '</div>';
+    tooltip += '<div style="font-size:11px;color:#8b949e">' + agg.count + ' 个连接</div>';
+    tooltip += '<div style="font-size:11px">发送: ' + sentStr + ' | 接收: ' + recvStr + '</div>';
+    agg.items.slice(0, 5).forEach(function(c) {
+      tooltip += '<div style="font-size:11px;color:#8b949e;margin-top:2px">' + c.remote_ip + ':' + c.remote_port + ' | ' + (c.process||'?') + '</div>';
+    });
+    if (agg.items.length > 5) tooltip += '<div style="font-size:11px;color:#8b949e">...等 ' + agg.items.length + ' 个</div>';
+
+    points.push({
+      name: first.geo.geo_str,
+      value: [lng, lat, agg.count],
+      itemStyle: { color: color, shadowBlur: 6, shadowColor: color },
+      tooltipHtml: tooltip
+    });
   });
 
   if (!_netMapChart) {
     _netMapChart = echarts.init(chartDom);
-    window.addEventListener('resize', () => { if (_netMapChart) _netMapChart.resize(); });
+    window.addEventListener('resize', function() { if (_netMapChart) _netMapChart.resize(); });
   }
 
   if (!_worldJsonLoaded) {
-    // 异步加载世界地图JSON
-    fetch('/data/world.json').then(r => r.json()).then(worldJson => {
+    fetch('/data/world.json').then(function(r) { return r.json(); }).then(function(worldJson) {
       echarts.registerMap('world', worldJson);
       _worldJsonLoaded = true;
       _drawNetMap(points);
-    }).catch(e => {
+    }).catch(function(e) {
       console.error('加载world.json失败:', e);
       _netMapChart.setOption({
         title: { text: '地图加载失败', left:'center', top:'center', textStyle:{color:'#8b949e',fontSize:14} }
@@ -735,20 +782,23 @@ function _drawNetMap(points) {
     tooltip: {
       trigger: 'item',
       formatter: function(p) {
-        if (p.data && p.data.name) return p.data.name;
+        if (p.data && p.data.tooltipHtml) return p.data.tooltipHtml;
         return p.name;
       },
       backgroundColor: '#161b22',
       borderColor: '#30363d',
-      textStyle: { color: '#c9d1d9', fontSize: 12 }
+      textStyle: { color: '#c9d1d9', fontSize: 12 },
+      extraCssText: 'max-width:320px;'
     },
     geo: {
       map: 'world',
       roam: true,
       silent: false,
+      center: _homeCoord,
+      zoom: 4,
       itemStyle: { areaColor: '#161b22', borderColor: '#30363d' },
       emphasis: { itemStyle: { areaColor: '#21262d' }, label: { show: false } },
-      scaleLimit: { min: 1, max: 10 }
+      scaleLimit: { min: 1, max: 15 }
     },
     series: [{
       name: '网络连接',
@@ -777,6 +827,32 @@ function _drawNetMap(points) {
     }]
   };
   _netMapChart.setOption(option, true);
+}
+
+function mapZoomIn() {
+  if (!_netMapChart) return;
+  var option = _netMapChart.getOption();
+  var zoom = (option.geo && option.geo[0] && option.geo[0].zoom) || 4;
+  _netMapChart.setOption({ geo: { zoom: Math.min(zoom * 1.3, 15) } });
+}
+
+function mapZoomOut() {
+  if (!_netMapChart) return;
+  var option = _netMapChart.getOption();
+  var zoom = (option.geo && option.geo[0] && option.geo[0].zoom) || 4;
+  _netMapChart.setOption({ geo: { zoom: Math.max(zoom / 1.3, 1) } });
+}
+
+function mapResetCenter() {
+  if (!_netMapChart) return;
+  _netMapChart.setOption({ geo: { center: _homeCoord, zoom: 4 } });
+}
+
+function _formatBytes(bytes) {
+  if (!bytes || bytes === 0) return '0 B';
+  var units = ['B', 'KB', 'MB', 'GB', 'TB'];
+  var i = Math.floor(Math.log(bytes) / Math.log(1024));
+  return (bytes / Math.pow(1024, i)).toFixed(1) + ' ' + units[i];
 }
 
 // ====== 路由跟踪 ======
