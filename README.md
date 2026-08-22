@@ -3,10 +3,10 @@ AIGC:
   ContentProducer: '001191110102MAD55U9H0F10002'
   ContentPropagator: '001191110102MAD55U9H0F10002'
   Label: '1'
-  ProduceID: '33197141-8fd1-443c-b109-35cf19e82026'
-  PropagateID: '33197141-8fd1-443c-b109-35cf19e82026'
-  ReservedCode1: 'c0a75543-eafb-48f6-b327-fad18d2edbfc'
-  ReservedCode2: 'c0a75543-eafb-48f6-b327-fad18d2edbfc'
+  ProduceID: '50b54687-a620-42dd-ad4f-ccd7f4cd77cd'
+  PropagateID: '50b54687-a620-42dd-ad4f-ccd7f4cd77cd'
+  ReservedCode1: '6773d34a-8602-47c5-bc30-aeee86555d9b'
+  ReservedCode2: '6773d34a-8602-47c5-bc30-aeee86555d9b'
 ---
 
 # linmon — Linux 进程与网络连接安全监控工具
@@ -191,6 +191,20 @@ linmon/
     ├── distro_helper.py   # 发行版适配模块
     └── sys_diag.py        # 系统诊断报告生成
 ```
+
+## 版本更新
+
+### v1.0.0 — 首个正式版本
+
+- 进程监控：高危进程识别、定时任务关联、网络连接、祖先链
+- 网络连接监控：IP归属地查询、TTL指纹推断对端OS、风险评级
+- Web 监控面板：ECharts 世界地图地理分布、表头排序、自动刷新
+- 一键复制 kill 命令
+- AI 安全分析：高危进程/可疑连接智能分析报告
+- 路由跟踪：逐跳归属地显示
+- 多发行版适配：Debian/RHEL/Arch/SUSE
+- 一键部署脚本 deploy.sh + 命令安装脚本 install.sh
+- CLI 命令包装：linmon / linmon-web 全局命令
 
 ## 技术栈
 
