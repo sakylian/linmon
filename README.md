@@ -3,18 +3,20 @@ AIGC:
   ContentProducer: '001191110102MAD55U9H0F10002'
   ContentPropagator: '001191110102MAD55U9H0F10002'
   Label: '1'
-  ProduceID: '0f6aa18f-bf74-4838-bf59-37019c46551e'
-  PropagateID: '0f6aa18f-bf74-4838-bf59-37019c46551e'
-  ReservedCode1: '749ae84a-59ea-451a-aee4-8a21b8e28ddc'
-  ReservedCode2: '749ae84a-59ea-451a-aee4-8a21b8e28ddc'
+  ProduceID: '667c8784-992d-4a75-b512-c6c5dba8f74f'
+  PropagateID: '667c8784-992d-4a75-b512-c6c5dba8f74f'
+  ReservedCode1: '5b3e2f49-538f-430b-a410-8fb28c2f449d'
+  ReservedCode2: '5b3e2f49-538f-430b-a410-8fb28c2f449d'
 ---
 
-# linmon — Linux / macOS 进程与网络连接安全监控工具
+# macmon — macOS 系统安全监控工具
 
-初学Linux的朋友，看着满屏的ps信息或者ss网络连接，蒙了，咋看？怎么了解哪些进程可能存在问题？有时候真心想呼唤火绒杀毒软件里面的一个组成部分：火绒剑，来帮你披荆斩棘，看清系统里面究竟在运行什么。
+一个 macOS 系统安全情况的可视化扫描器。
+
+初学Linux/macOS的朋友，看着满屏的ps信息或者ss网络连接，蒙了，咋看？怎么了解哪些进程可能存在问题？有时候真心想呼唤火绒杀毒软件里面的一个组成部分：火绒剑，来帮你披荆斩棘，看清系统里面究竟在运行什么。
 我用中国电信的星辰超级智能体（TeleAgent）制作了这个工具，希望能够帮到你。
 
-轻量级 Linux / macOS 安全监控工具，提供命令行和 Web 面板两种使用方式。实时采集系统进程、网络连接信息，结合本地规则引擎和可选的 AI 分析，帮助快速发现可疑进程、异常网络外连等安全隐患。
+轻量级安全监控工具，支持 **macOS** 和 **Linux**，提供命令行和 Web 面板两种使用方式。实时采集系统进程、网络连接信息，结合本地规则引擎和可选的 AI 分析，帮助快速发现可疑进程、异常网络外连等安全隐患。
 
 ## 功能特性
 
@@ -337,6 +339,6 @@ linmon/
 
 ## License
 
-MIT
+Apache License 2.0
 
 > AI生成
