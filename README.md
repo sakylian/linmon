@@ -255,6 +255,10 @@ linmon/
     ├── report_exporter.py # AI 报告导出 (Markdown / PDF)
     ├── distro_helper.py   # 发行版适配模块
     └── sys_diag.py        # 系统诊断报告生成
+└── Skill-for-Agent/       # 给智能体(Agent)使用的技能源文件，跨 Linux/macOS/Windows
+    ├── SKILL.md           # 技能定义（智能体入口）
+    ├── scripts/           # 智能体可调用脚本：安全扫描/路由追踪/归属地查询/加固建议
+    └── references/        # 威胁模式与合规参考知识
 ```
 
 ## 版本更新
