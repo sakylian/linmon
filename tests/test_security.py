@@ -14,8 +14,10 @@ from modules.ai_analyzer import redact_text, AIAnalyzer
 from modules.geo_locator import (
     classify_port, is_private_ip, is_valid_public_ip,
     Zxipv6wryReader, CdnMatcher, GeoLocator, find_ipv6_db, find_cdn_yaml,
+    cdn_lookup,
 )
-from modules.net_monitor import _assess_connection_risk, configure_geo_risk
+from modules.net_monitor import (_assess_connection_risk, configure_geo_risk,
+                                 _extract_hostname_from_payload)
 from modules.proc_monitor import _detect_high_risk, _exe_is_deleted
 from modules.report_exporter import export_markdown, export_pdf
 
@@ -242,9 +244,10 @@ class TestCdnMatcher(unittest.TestCase):
         self.assertTrue(cm.load(_SAMPLE_CDN))
         self.assertIsNotNone(cm.lookup('a.b.akamai.net'))
         self.assertEqual(cm.lookup('a.b.akamai.net')['provider'], 'Akamai CDN')
-        # cloudflare.net 命中，cloudflare.com 不命中（数据集中无该键）
+        # cloudflare.net 命中；cloudflare.com 由内置覆盖层补充
         self.assertIsNotNone(cm.lookup('www.cloudflare.net'))
-        self.assertIsNone(cm.lookup('www.cloudflare.com'))
+        self.assertIsNotNone(cm.lookup('www.cloudflare.com'))
+        self.assertEqual(cm.lookup('www.cloudflare.com')['provider'], 'Cloudflare')
         self.assertIsNone(cm.lookup('example.com'))
 
     def test_longest_suffix_wins(self):
@@ -253,6 +256,40 @@ class TestCdnMatcher(unittest.TestCase):
         # 同时匹配多级后缀时取最长
         r = cm.lookup('img.360cdn.com')
         self.assertEqual(r['provider'], '360 云 CDN (由奇虎 360 运营)')
+
+    def test_overlay_coverage(self):
+        cm = CdnMatcher()
+        cm.load(_SAMPLE_CDN)
+        # 内置覆盖层补充的常用大厂域名
+        self.assertEqual(cm.lookup('img.qcloudcdn.com')['provider'], '腾讯云 CDN')
+        self.assertEqual(cm.lookup('a.tencentcloud.com')['provider'], '腾讯云')
+        self.assertEqual(cm.lookup('qcloud.com')['provider'], '腾讯云')
+        self.assertEqual(cm.lookup('www.akamai.com')['provider'], 'Akamai CDN')
+        # cdn.yml 已有项仍正常（myqcloud.com 已在 yaml 内）
+        self.assertEqual(cm.lookup('a.b.myqcloud.com')['provider'], '腾讯云对象存储')
+
+
+class TestSniExtraction(unittest.TestCase):
+    def test_http_host_header(self):
+        self.assertEqual(
+            _extract_hostname_from_payload('GET / HTTP/1.1\r\nHost: www.example.com\r\n'),
+            'www.example.com')
+        # 带端口的 Host
+        self.assertEqual(
+            _extract_hostname_from_payload('Host: cdn.foo.net:8080\r\n'),
+            'cdn.foo.net')
+
+    def test_tls_sni_like(self):
+        # tcpdump -A 中 ClientHello 的 SNI 以可读 ASCII 出现
+        self.assertEqual(
+            _extract_hostname_from_payload('.....0..0.xx.myqcloud.com....0.'),
+            'xx.myqcloud.com')
+
+    def test_no_domain(self):
+        self.assertIsNone(_extract_hostname_from_payload(''))
+        self.assertIsNone(_extract_hostname_from_payload('flags [P.] seq 1:20'))
+        # 纯文本句子里的 "e.g." 不应被当作域名
+        self.assertIsNone(_extract_hostname_from_payload('see e.g. note above'))
 
 
 @unittest.skipUnless(os.path.isfile(_SAMPLE_IPV6) and os.path.isfile(_SAMPLE_CDN),
@@ -275,6 +312,19 @@ class TestGeoLocatorV6Cdn(unittest.TestCase):
         g = GeoLocator.lookup_ip('23.45.67.89', hostname='a.b.akamai.net')
         self.assertIsNotNone(g.get('cdn'))
         self.assertEqual(g['cdn']['provider'], 'Akamai CDN')
+
+    def test_cdn_node_flagged(self):
+        # 命中 CDN 时标记边缘节点并给出归属地不可靠提示
+        g = GeoLocator.lookup_ip('23.45.67.89', hostname='img.myqcloud.com')
+        self.assertIsNotNone(g.get('cdn'))
+        self.assertTrue(g.get('cdn_node'))
+        self.assertIn('边缘节点', g.get('geo_note', ''))
+
+    def test_no_cdn_no_flag(self):
+        g = GeoLocator.lookup_ip('23.45.67.89')
+        self.assertIsNone(g.get('cdn'))
+        self.assertFalse(g.get('cdn_node', False))
+        self.assertNotIn('geo_note', g)
 
 
 class TestDbUpdater(unittest.TestCase):

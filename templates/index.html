@@ -1295,10 +1295,28 @@ function renderCapture(d) {
     _asCard('发送', _formatBytes(d.sent_bytes)) +
     _asCard('接收', _formatBytes(d.recv_bytes)) +
     _asCard('本机进程', (d.process && d.process.name) ? d.process.name : '—') +
+    _asCard('CDN/云厂商', (d.cdn && d.cdn.provider) ? d.cdn.provider : '—') +
     '</div>';
   if (d.process && d.process.pid) {
     h += '<div class="kv"><span class="k">PID / 命令行</span><span class="val">' + d.process.pid +
       ' / ' + _esc(d.process.cmdline || '—') + '</span></div>';
+  }
+  if (d.sni) {
+    h += '<div class="kv"><span class="k">解析域名 (SNI/Host)</span><span class="val">' + _esc(d.sni) + '</span></div>';
+  }
+  if (d.cdn) {
+    h += '<div class="kv"><span class="k">CDN / 云厂商</span><span class="val">' +
+      _esc(d.cdn.provider) +
+      (d.cdn.link ? ' <a href="' + _esc(d.cdn.link) + '" target="_blank" rel="noreferrer" style="color:#58a6ff">官网↗</a>' : '') +
+      (d.cdn.matched ? ' <span style="color:#8b949e">(' + _esc(d.cdn.matched) + ')</span>' : '') +
+      '</span></div>';
+  }
+  if (d.geo) {
+    h += '<div class="kv"><span class="k">归属地研判</span><span class="val">' + _esc(d.geo.geo_str || '未知') + '</span></div>';
+  }
+  if (d.cdn) {
+    h += '<div style="font-size:11px;color:#d29922;margin:4px 0 6px">⚠ 该连接经 CDN/云厂商边缘节点：IP 归属地（' +
+      _esc((d.geo && d.geo.geo_str) || '未知') + '）仅代表边缘节点位置，可能与真实业务所在地不同，慎用于"境内/境外"判定。</div>';
   }
   if (d.note) h += '<div style="font-size:11px;color:#8b949e;margin:4px 0">' + _esc(d.note) + '</div>';
   h += '<div style="font-size:12px;color:#8b949e;margin:6px 0 4px">数据包（本地抓包，未对外发送）：</div>';

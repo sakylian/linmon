@@ -366,6 +366,17 @@ class Zxipv6wryReader:
         self._loaded = False
 
 
+# 内置 CDN 覆盖层：补充 cdn.yml 可能缺失的常用大厂域名。
+# 仅当 cdn.yml 未包含该键时合入，保证 `linmon update` 拉取的社区数据优先。
+_CDN_OVERLAY = {
+    'qcloudcdn.com': {'name': '腾讯云 CDN', 'link': 'https://cloud.tencent.com/product/cdn'},
+    'qcloud.com': {'name': '腾讯云', 'link': 'https://cloud.tencent.com'},
+    'tencentcloud.com': {'name': '腾讯云', 'link': 'https://cloud.tencent.com'},
+    'cloudflare.com': {'name': 'Cloudflare', 'link': 'https://www.cloudflare.com'},
+    'akamai.com': {'name': 'Akamai CDN', 'link': 'https://www.akamai.com'},
+}
+
+
 class CdnMatcher:
     """CDN 厂商域名匹配器 (cdn.yml: domain -> {name, link})，按域名后缀最长匹配。"""
 
@@ -388,6 +399,10 @@ class CdnMatcher:
             self._loaded = False
             return False
         self._data = {str(k).lower(): v for k, v in data.items() if k}
+        # 合入内置覆盖层：填补 cdn.yml 缺漏的常用 CDN 域名
+        for dom, info in _CDN_OVERLAY.items():
+            if dom not in self._data:
+                self._data[dom] = info
         self._loaded = True
         return True
 
@@ -560,6 +575,11 @@ class GeoLocator:
         }
         if cdn:
             result['cdn'] = cdn
+            result['cdn_node'] = True
+            # CDN/云厂商边缘节点的 IP 归属地往往只是边缘机房位置，
+            # 与真实业务所在地可能不同，需提示不可直接用于"境内/境外"判定
+            result['geo_note'] = ('该 IP 属于 CDN/云厂商边缘节点，IP 归属地仅供参考，'
+                                  '可能与真实业务所在地不同')
         return result
 
     @classmethod

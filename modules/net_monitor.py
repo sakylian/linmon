@@ -23,7 +23,7 @@ except ImportError:
 
 from .geo_locator import (
     GeoLocator, is_private_ip, is_valid_public_ip,
-    classify_port, guess_remote_os, resolve_coordinates
+    classify_port, guess_remote_os, resolve_coordinates, cdn_lookup
 )
 from .proc_monitor import (
     _parse_proc_net_tcp, _parse_proc_net_tcp6, TCP_STATES,
@@ -773,6 +773,42 @@ def _get_local_ip_addrs():
     return ips
 
 
+# 常见顶级域白名单：用于从抓包载荷中筛除形如 "e.g." 的误匹配
+_TLDS = {
+    'com', 'net', 'org', 'cn', 'io', 'edu', 'gov', 'co', 'uk', 'de', 'fr', 'jp',
+    'ru', 'us', 'tv', 'me', 'app', 'dev', 'cloud', 'biz', 'info', 'name', 'pro',
+    'xyz', 'top', 'vip', 'cc', 'hk', 'tw', 'kr', 'sg', 'in', 'au', 'br', 'ca',
+}
+_HOST_HEADER_RE = re.compile(r'Host:\s*([^\s/\r\n]+)', re.IGNORECASE)
+_DOMAIN_RE = re.compile(
+    # 首标签必须以字母开头，避免把 TLS SNI 长度前缀字节（如 "0.xx"）误并入域名
+    r'[A-Za-z](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9-]{1,63})+\.('
+    + '|'.join(_TLDS) + r')\b'
+)
+
+
+def _extract_hostname_from_payload(preview):
+    """从 tcpdump -A 的 ASCII 载荷预览里提取域名（HTTP Host 头或 TLS SNI）。
+
+    返回小写主机名（已去掉端口与结尾点），无则 None。仅用于本地 CDN 标注，
+    不做任何外发。
+    """
+    if not preview:
+        return None
+    m = _HOST_HEADER_RE.search(preview)
+    if m:
+        host = m.group(1).strip().lower()
+        return host.split(':')[0].rstrip('.')
+    # TLS ClientHello 的 SNI 以可读 ASCII 出现在载荷中
+    m = _DOMAIN_RE.search(preview)
+    if m:
+        cand = m.group(0).lower().rstrip('.')
+        # 排除形如纯 IP 的误匹配
+        if '.' in cand and not is_valid_public_ip(cand):
+            return cand
+    return None
+
+
 def capture_traffic(remote_ip, remote_port=None, iface='any', count=60, timeout=8):
     """对指定远端 IP/端口抓包并做本地分析（不对外发送任何数据）。
 
@@ -885,7 +921,24 @@ def capture_traffic(remote_ip, remote_port=None, iface='any', count=60, timeout=
             if p['dir'] == 'recv' and p['dport'] in proc_map:
                 process = proc_map[p['dport']]; break
 
-    return {
+    # 从抓包载荷提取 SNI/Host 域名，用于 CDN 标注（HTTPS 无需反向 DNS）
+    sni = None
+    for p in packets:
+        if p['dir'] in ('sent', 'other') and p.get('payload_preview'):
+            hn = _extract_hostname_from_payload(p['payload_preview'])
+            if hn:
+                sni = hn
+                break
+    cdn = None
+    geo = None
+    if sni:
+        try:
+            cdn = cdn_lookup(sni)
+            geo = GeoLocator.lookup_ip(remote_ip, hostname=sni)
+        except Exception:
+            pass
+
+    result = {
         'target': '%s:%s' % (remote_ip, remote_port) if remote_port else remote_ip,
         'tool': tool,
         'count': len(packets),
@@ -899,3 +952,10 @@ def capture_traffic(remote_ip, remote_port=None, iface='any', count=60, timeout=
         'packets': packets,
         'note': '本地抓包分析，数据仅在本机展示，未对外发送',
     }
+    if sni:
+        result['sni'] = sni
+    if cdn:
+        result['cdn'] = cdn
+    if geo:
+        result['geo'] = geo
+    return result
