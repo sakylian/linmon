@@ -1,6 +1,10 @@
 #!/bin/bash
 # linmon-web 命令包装脚本
-SCRIPT_PATH="$(readlink -f "$0")"
+if command -v realpath >/dev/null 2>&1; then
+    SCRIPT_PATH="$(realpath "$0")"
+else
+    SCRIPT_PATH="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
+fi
 SCRIPT_DIR="$(dirname "$SCRIPT_PATH")"
 
 if [ -f "$SCRIPT_DIR/venv/bin/python3" ]; then

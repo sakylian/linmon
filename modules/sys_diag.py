@@ -27,16 +27,17 @@ def generate_text_report(qqwry_path=None, include_internal=False, ai_report=None
     lines = []
     now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     distro = get_distro()
+    platform_name = 'macOS' if distro.get_family() == 'macos' else 'Linux'
 
     lines.append('=' * 78)
-    lines.append(f'  Linux 系统安全诊断报告 (linmon)')
+    lines.append(f'  {platform_name} 系统安全诊断报告 (linmon)')
     lines.append(f'  生成时间: {now}')
     lines.append('=' * 78)
     lines.append('')
 
     # ====== 第一部分: 系统信息 ======
     lines.append('[系统信息]')
-    lines.append(f'  发行版: {distro.get_name()}')
+    lines.append(f'  系统: {distro.get_name()}')
     lines.append(f'  家族: {distro.get_family()} ({distro.get_id()})')
     lines.append(f'  包管理器: {distro.get_pkg_manager()}')
     lines.append(f'  服务管理器: {distro.get_service_manager()}')

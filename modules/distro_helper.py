@@ -7,10 +7,14 @@ distro_helper.py — 发行版适配模块
 """
 
 import os
+import sys
 import subprocess
 import platform
 import shutil
 from pathlib import Path
+
+# 是否运行在 macOS (Darwin)
+IS_MACOS = sys.platform == 'darwin'
 
 
 class DistroHelper:
@@ -28,13 +32,33 @@ class DistroHelper:
     def _detect_distro(self):
         """检测当前发行版信息"""
         info = {
-            'family': 'unknown',      # debian / rhel / arch / suse
+            'family': 'unknown',      # debian / rhel / arch / suse / macos
             'id': '',                 # ubuntu, debian, centos, rhel, rocky, almalinux
             'version': '',            # 22.04, 11, 9
             'name': '',               # Ubuntu 22.04 LTS
-            'pkg_manager': '',        # apt / dnf / yum / pacman / zypper
-            'service_manager': 'systemd',  # systemd / sysvinit / openrc
+            'pkg_manager': '',        # apt / dnf / yum / pacman / zypper / brew
+            'service_manager': 'systemd',  # systemd / sysvinit / openrc / launchd
         }
+
+        # macOS 优先：无 /etc/os-release，用 sw_vers / sysctl
+        if IS_MACOS or platform.system().lower() == 'darwin':
+            info['family'] = 'macos'
+            info['id'] = 'macos'
+            info['service_manager'] = 'launchd'
+            if shutil.which('brew'):
+                info['pkg_manager'] = 'brew'
+            try:
+                r = subprocess.run(['sw_vers'], capture_output=True, text=True, timeout=5)
+                for line in r.stdout.split('\n'):
+                    if line.startswith('ProductName'):
+                        info['name'] = line.split(':', 1)[1].strip()
+                    elif line.startswith('ProductVersion'):
+                        info['version'] = line.split(':', 1)[1].strip()
+            except Exception:
+                pass
+            if not info['name']:
+                info['name'] = platform.platform()
+            return info
 
         # 方法1: 读取 /etc/os-release (现代Linux标准)
         os_release = {}
@@ -207,6 +231,56 @@ class DistroHelper:
             pass
         return timers
 
+    def get_launchd_agents(self):
+        """获取 macOS launchd 启动项（LaunchAgents / LaunchDaemons 的 plist）。
+
+        返回 list[dict]: {label, plist, path}，供定时/自启检测使用。
+        """
+        agents = []
+        # 常见 launchd plist 目录
+        dirs = [
+            os.path.expanduser('~/Library/LaunchAgents'),
+            '/Library/LaunchAgents',
+            '/Library/LaunchDaemons',
+            '/System/Library/LaunchAgents',
+            '/System/Library/LaunchDaemons',
+        ]
+        for d in dirs:
+            if not os.path.isdir(d):
+                continue
+            try:
+                for entry in os.listdir(d):
+                    if not entry.endswith('.plist'):
+                        continue
+                    full = os.path.join(d, entry)
+                    label = os.path.splitext(entry)[0]
+                    agents.append({
+                        'label': label,
+                        'plist': full,
+                        'path': d,
+                    })
+            except (FileNotFoundError, PermissionError):
+                continue
+        return agents
+
+    def get_scheduled_items(self):
+        """统一获取定时/自启任务。Linux 返回 cron/systemd；macOS 返回 launchd。"""
+        if IS_MACOS or self.get_service_manager() == 'launchd':
+            return {
+                'launchd': self.get_launchd_agents(),
+                'cron_dirs': [],
+                'systemd_timers': [],
+                'rc_local': '',
+                'initd_scripts': [],
+            }
+        return {
+            'launchd': [],
+            'cron_dirs': self.get_cron_dirs(),
+            'systemd_timers': self.get_systemd_timers(),
+            'rc_local': self.get_rc_local(),
+            'initd_scripts': self.get_initd_scripts(),
+        }
+
     def get_systemd_services_running(self):
         """获取正在运行的 systemd 服务列表"""
         services = []
@@ -256,6 +330,26 @@ class DistroHelper:
             'active': False,
             'rules': []
         }
+        # macOS: 使用 pfctl / application firewall
+        if IS_MACOS:
+            # 应用层防火墙 (socketfilterfw)
+            if shutil.which('socketfilterfw'):
+                result['type'] = 'application_firewall'
+                r = subprocess.run(['/usr/libexec/ApplicationFirewall/socketfilterfw', '--getglobalstate'],
+                                   capture_output=True, text=True)
+                if r.returncode == 0:
+                    result['active'] = 'enabled' in r.stdout.lower()
+            # PF 防火墙（需要 sudo 查看规则）
+            if shutil.which('pfctl'):
+                result['type'] = 'pf'
+                r = subprocess.run(['pfctl', '-s', 'info'], capture_output=True, text=True, timeout=5)
+                if r.returncode == 0 and 'Status: Enabled' in r.stdout:
+                    result['active'] = True
+                    r2 = subprocess.run(['pfctl', '-s', 'rules'], capture_output=True, text=True, timeout=5)
+                    if r2.returncode == 0:
+                        result['rules'] = [ln.strip() for ln in r2.stdout.split('\n') if ln.strip()]
+            return result
+
         # ufw (Debian系常用)
         if shutil.which('ufw'):
             result['type'] = 'ufw'

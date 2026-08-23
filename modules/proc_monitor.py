@@ -7,6 +7,7 @@ proc_monitor.py — 进程详细监控模块
 """
 
 import os
+import sys
 import time
 import socket
 import struct
@@ -23,6 +24,9 @@ except ImportError:
 from .distro_helper import get_distro
 
 logger = logging.getLogger(__name__)
+
+# 当前是否运行在 macOS (Darwin) 上。macOS 没有 /proc、/sys、ss、systemd 等。
+IS_MACOS = sys.platform == 'darwin'
 
 # Linux 常见进程知识库
 PROCESS_DB = {
@@ -326,8 +330,89 @@ def _get_pid_socket_inodes(pid):
     return inodes
 
 
+# 反向状态映射: psutil 状态字符串 -> /proc 状态数值（与 TCP_STATES 对应）
+_PSUTIL_STATE_TO_CODE = {v: k for k, v in TCP_STATES.items()}
+
+
+def _psutil_conn_to_proc(conn):
+    """将 psutil 连接对象转换为与 /proc 解析一致的连接字典。
+
+    psutil.net_connections() 在 macOS 上原生可用（无需 /proc），
+    这里统一成下游使用的 {'local_ip','local_port','remote_ip','remote_port',
+    'state','protocol'} 结构，state 为 /proc 数值码。
+    """
+    laddr = conn.laddr
+    raddr = conn.raddr
+    family = getattr(conn, 'family', socket.AF_INET)
+    if laddr:
+        local_ip = laddr.ip or ('::' if family == socket.AF_INET6 else '0.0.0.0')
+        local_port = int(laddr.port or 0)
+    else:
+        local_ip, local_port = '0.0.0.0', 0
+    if raddr:
+        remote_ip = raddr.ip or ''
+        remote_port = int(raddr.port or 0)
+    else:
+        remote_ip, remote_port = '0.0.0.0', 0
+    proto = 'tcp6' if family == socket.AF_INET6 else 'tcp'
+    status = getattr(conn, 'status', None) or ''
+    state = _PSUTIL_STATE_TO_CODE.get(status.upper(), 0x01)
+    return {
+        'local_ip': local_ip,
+        'local_port': local_port,
+        'remote_ip': remote_ip,
+        'remote_port': remote_port,
+        'state': state,
+        'inode': getattr(conn, 'fd', 0) or 0,
+        'protocol': proto,
+    }
+
+
+# macOS 上 psutil 网络连接缓存: {pid: [conn_dict, ...]}，仅在 macOS 使用
+_PSUTIL_CONN_CACHE = None
+
+
+def _get_psutil_connections_cached():
+    """一次性采集全部 TCP 连接并按 pid 缓存（macOS 用）。
+
+    macOS 非 root 下 psutil.net_connections() 会因个别进程 AccessDenied
+    导致整批抛异常；改为逐进程 proc.connections() 采集，跳过拒绝访问的进程。
+    """
+    global _PSUTIL_CONN_CACHE
+    if _PSUTIL_CONN_CACHE is not None:
+        return _PSUTIL_CONN_CACHE
+    cache = defaultdict(list)
+    if psutil is not None:
+        for proc in psutil.process_iter(['pid']):
+            try:
+                for conn in proc.connections(kind='tcp'):
+                    cache[proc.pid].append(_psutil_conn_to_proc(conn))
+            except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+                continue
+    _PSUTIL_CONN_CACHE = dict(cache)
+    return _PSUTIL_CONN_CACHE
+
+
+def _reset_psutil_conn_cache():
+    """清理 psutil 连接缓存（测试用）。"""
+    global _PSUTIL_CONN_CACHE
+    _PSUTIL_CONN_CACHE = None
+
+
 def _get_process_network_connections(pid):
     """获取指定进程的网络连接"""
+    # macOS: 使用 psutil 网络连接（无 /proc、/sys）
+    if IS_MACOS:
+        conn_map = _get_psutil_connections_cached()
+        proc_conns = conn_map.get(pid, [])
+        ports = set()
+        for c in proc_conns:
+            ports.add(c['local_port'])
+            if c['remote_port'] > 0:
+                ports.add(c['remote_port'])
+        return list(proc_conns), ports
+
+    # Linux: 走 /proc 的 inode 关联
     pid_inodes = _get_pid_socket_inodes(pid)
     if not pid_inodes:
         return [], set()
@@ -395,10 +480,44 @@ def _detect_scheduled_tasks(proc_name, proc_cmdline, distro):
         'is_systemd_timer': False,
         'is_rc_local': False,
         'is_initd': False,
+        'is_launchd': False,
         'cron_entries': [],
         'systemd_timer_entries': [],
-        'details': ''
+        'launchd_entries': [],
+        'details': '无定时/自启配置',
     }
+
+    # macOS: 检测 launchd 自启项
+    if IS_MACOS or distro.get_service_manager() == 'launchd':
+        try:
+            for agent in distro.get_launchd_agents():
+                label = agent.get('label', '').lower()
+                plist = agent.get('plist', '')
+                if proc_lower and proc_lower in label:
+                    sched_info['is_launchd'] = True
+                    sched_info['launchd_entries'].append(f"{agent.get('label')} ({plist})")
+                    continue
+                if not cmd_lower or not plist:
+                    continue
+                # 读取 plist 内容做二次匹配
+                try:
+                    with open(plist, 'r', encoding='utf-8', errors='ignore') as f:
+                        content = f.read().lower()
+                    if cmd_lower in content or proc_lower in content:
+                        sched_info['is_launchd'] = True
+                        sched_info['launchd_entries'].append(f"{agent.get('label')} ({plist})")
+                except (PermissionError, FileNotFoundError):
+                    pass
+        except Exception:
+            pass
+        # 汇总（launchd 分支）
+        parts = []
+        if sched_info['is_launchd']:
+            parts.append(f"launchd自启({len(sched_info['launchd_entries'])}个)")
+        sched_info['details'] = '; '.join(parts) if parts else '无定时/自启配置'
+        return sched_info
+
+    # 1. 检查 crontab
 
     proc_lower = proc_name.lower()
     cmd_lower = (proc_cmdline or '').lower()
@@ -780,7 +899,8 @@ def get_all_processes(boot_time=None, scan_schedules=True, scan_network=True):
             sched = _detect_scheduled_tasks(info['name'], info['cmdline'], distro)
         else:
             sched = {'details': '未扫描', 'is_cron': False, 'is_systemd_timer': False,
-                     'is_rc_local': False, 'is_initd': False, 'cron_entries': [], 'systemd_timer_entries': []}
+                     'is_rc_local': False, 'is_initd': False, 'is_launchd': False,
+                     'cron_entries': [], 'systemd_timer_entries': [], 'launchd_entries': []}
 
         # 网络连接
         proc_conns = []
@@ -847,6 +967,7 @@ def get_all_processes(boot_time=None, scan_schedules=True, scan_network=True):
             'is_systemd_timer': sched['is_systemd_timer'],
             'is_rc_local': sched['is_rc_local'],
             'is_initd': sched['is_initd'],
+            'is_launchd': sched.get('is_launchd', False),
             'schedule_str': sched['details'],
             # 网络
             'network_connections': proc_conns,
@@ -902,33 +1023,36 @@ def get_system_boot_info():
     now = time.time()
     uptime = now - boot_time
 
-    # 从 /proc/uptime 获取更精确的uptime
+    # 从 /proc/uptime 获取更精确的uptime（仅 Linux）
     proc_uptime = uptime
-    try:
-        with open('/proc/uptime', 'r') as f:
-            proc_uptime = float(f.read().split()[0])
-    except (FileNotFoundError, ValueError, IndexError):
-        pass
+    if not IS_MACOS:
+        try:
+            with open('/proc/uptime', 'r') as f:
+                proc_uptime = float(f.read().split()[0])
+        except (FileNotFoundError, ValueError, IndexError):
+            pass
 
-    # 从 who -b 获取启动时间
+    # 从 who -b 获取启动时间（macOS 的 who 不支持 -b，跳过）
     who_boot = ''
-    try:
-        r = subprocess.run(['who', '-b'], capture_output=True, text=True, timeout=5)
-        if r.returncode == 0 and r.stdout.strip():
-            who_boot = r.stdout.strip()
-    except Exception:
-        pass
+    if not IS_MACOS:
+        try:
+            r = subprocess.run(['who', '-b'], capture_output=True, text=True, timeout=5)
+            if r.returncode == 0 and r.stdout.strip():
+                who_boot = r.stdout.strip()
+        except Exception:
+            pass
 
-    # systemd 启动时间
+    # systemd 启动时间（仅 Linux）
     systemd_boot = ''
-    try:
-        r = subprocess.run(['systemd-analyze'], capture_output=True, text=True, timeout=5)
-        if r.returncode == 0:
-            systemd_boot = r.stdout.strip()
-    except Exception:
-        pass
+    if not IS_MACOS:
+        try:
+            r = subprocess.run(['systemd-analyze'], capture_output=True, text=True, timeout=5)
+            if r.returncode == 0:
+                systemd_boot = r.stdout.strip()
+        except Exception:
+            pass
 
-    # 用户登录信息
+    # 用户登录信息（who 在 macOS 也可用）
     users = []
     try:
         r = subprocess.run(['who'], capture_output=True, text=True, timeout=5)
@@ -983,7 +1107,7 @@ def get_process_summary(processes=None):
             risky_count += 1
         if p['network_connections']:
             has_network += 1
-        if p['is_cron'] or p['is_systemd_timer'] or p['is_rc_local'] or p['is_initd']:
+        if p['is_cron'] or p['is_systemd_timer'] or p['is_rc_local'] or p['is_initd'] or p.get('is_launchd'):
             has_schedule += 1
         listening_total.update(p['listening_ports'])
 

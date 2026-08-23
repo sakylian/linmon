@@ -63,7 +63,8 @@ def export_pdf(report):
     from reportlab.pdfbase import pdfmetrics
     from reportlab.pdfbase.cidfonts import UnicodeCIDFont
     from reportlab.platypus import (
-        SimpleDocTemplate, Paragraph, Spacer, Preformatted, HRFlowable, KeepTogether
+        SimpleDocTemplate, Paragraph, Spacer, Preformatted, HRFlowable,
+        KeepTogether, Table, TableStyle,
     )
 
     FONT = 'STSong-Light'
@@ -97,15 +98,93 @@ def export_pdf(report):
                   backColor=colors.HexColor('#f4f4f4'), borderColor=colors.HexColor('#dddddd'),
                   borderWidth=0.5, borderPadding=4, spaceAfter=6,
                   textColor=colors.HexColor('#222222')),
+        'th': S('th', fontSize=9.5, leading=13, alignment=TA_LEFT,
+                textColor=colors.HexColor('#ffffff'),
+                backColor=colors.HexColor('#0b66c2'),
+                borderPadding=4),
+        'td': S('td', fontSize=9.5, leading=13, alignment=TA_LEFT,
+                borderPadding=4),
     }
 
     def esc(s):
+        """转义 XML 特殊字符（必须在 inline 之前调用）"""
+        if not s:
+            return s
         return s.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
 
     def inline(s):
+        """将 Markdown 行内标记转为 reportlab XML 标签。须在 esc 之后调用。"""
+        if not s:
+            return s
+        # 加粗 **text** 或 __text__
         s = re.sub(r'\*\*(.+?)\*\*', r'<b>\1</b>', s)
+        s = re.sub(r'__(.+?)__', r'<b>\1</b>', s)
+        # 斜体 *text* 或 _text_（避免与加粗冲突：只匹配单个 * 且后面非空格）
+        s = re.sub(r'(?<!\*)\*(?!\s)(.+?)(?<!\s)\*(?!\*)', r'<i>\1</i>', s)
+        # 删除线 ~~text~~
+        s = re.sub(r'~~(.+?)~~', r'<strike>\1</strike>', s)
+        # 行内代码 `code`
         s = re.sub(r'`(.+?)`', r'<font face="Courier">\1</font>', s)
+        # 链接 [text](url) → 只保留 text 并加下划线
+        s = re.sub(r'\[([^\]]+)\]\([^)]+\)', r'<u>\1</u>', s)
         return s
+
+    def inline_html(text):
+        """先转义再渲染行内标记"""
+        return inline(esc(text))
+
+    # ---- 表格解析 ----
+    def parse_table_row(line):
+        """解析 markdown 表格行，返回单元格列表。"""
+        line = line.strip()
+        if line.startswith('|'):
+            line = line[1:]
+        if line.endswith('|'):
+            line = line[:-1]
+        return [cell.strip() for cell in line.split('|')]
+
+    def is_separator_row(line):
+        """判断是否为表格分隔行 |---|---|"""
+        cells = parse_table_row(line)
+        if not cells:
+            return False
+        return all(re.match(r'^:?-{2,}:?$', c) for c in cells)
+
+    def build_table(header_cells, rows):
+        """用 reportlab Table 构建带样式的表格，返回 flowable。"""
+        col_count = len(header_cells)
+
+        # 表头 Paragraph
+        header_paras = [Paragraph(inline_html(c), styles['th']) for c in header_cells]
+
+        # 数据行 Paragraph
+        data = [header_paras]
+        for row in rows:
+            # 补齐列数
+            while len(row) < col_count:
+                row.append('')
+            data.append([Paragraph(inline_html(c), styles['td']) for c in row[:col_count]])
+
+        table = Table(data, hAlign='LEFT')
+        table.setStyle(TableStyle([
+            # 表头背景
+            ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#0b66c2')),
+            # 网格线
+            ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor('#cccccc')),
+            # 表头字体
+            ('TEXTCOLOR', (0, 0), (-1, 0), colors.white),
+            # 内边距
+            ('TOPPADDING', (0, 0), (-1, -1), 4),
+            ('BOTTOMPADDING', (0, 0), (-1, -1), 4),
+            ('LEFTPADDING', (0, 0), (-1, -1), 6),
+            ('RIGHTPADDING', (0, 0), (-1, -1), 6),
+            # 斑马纹（偶数行浅灰）
+            ('ROWBACKGROUNDS', (0, 1), (-1, -1),
+             [colors.white, colors.HexColor('#f6f8fa')]),
+            # 垂直对齐
+            ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+        ]))
+        return table
 
     def md_to_flowables(md):
         flow = []
@@ -120,12 +199,14 @@ def export_pdf(report):
             if para_buf:
                 text = ' '.join(x.strip() for x in para_buf if x.strip())
                 if text:
-                    flow.append(Paragraph(inline(esc(text)), styles['body']))
+                    flow.append(Paragraph(inline_html(text), styles['body']))
                 para_buf.clear()
 
         while i < n:
             line = lines[i]
             st = line.strip()
+
+            # 代码块
             if st.startswith('```'):
                 flush_para()
                 if not in_code:
@@ -140,10 +221,14 @@ def export_pdf(report):
                 code_buf.append(line)
                 i += 1
                 continue
+
+            # 空行
             if not st:
                 flush_para()
                 i += 1
                 continue
+
+            # 水平分割线
             if st in ('---', '***', '___'):
                 flush_para()
                 flow.append(HRFlowable(width='100%', thickness=0.6,
@@ -151,21 +236,56 @@ def export_pdf(report):
                                        spaceBefore=4, spaceAfter=6))
                 i += 1
                 continue
+
+            # 表格检测：当前行含 | 且下一行是分隔行
+            if '|' in line and i + 1 < n and is_separator_row(lines[i + 1].strip()):
+                flush_para()
+                header_cells = parse_table_row(st)
+                # 跳过分隔行
+                i += 2
+                rows = []
+                while i < n:
+                    row_line = lines[i].strip()
+                    if not row_line or '|' not in row_line:
+                        break
+                    rows.append(parse_table_row(row_line))
+                    i += 1
+                if header_cells and rows:
+                    flow.append(build_table(header_cells, rows))
+                    flow.append(Spacer(1, 6))
+                continue
+
+            # 标题
             if st.startswith('# '):
-                flush_para(); flow.append(Paragraph(inline(esc(st[2:])), styles['h1'])); i += 1; continue
+                flush_para(); flow.append(Paragraph(inline_html(st[2:]), styles['h1'])); i += 1; continue
             if st.startswith('## '):
-                flush_para(); flow.append(Paragraph(inline(esc(st[3:])), styles['h2'])); i += 1; continue
+                flush_para(); flow.append(Paragraph(inline_html(st[3:]), styles['h2'])); i += 1; continue
             if st.startswith('### '):
-                flush_para(); flow.append(Paragraph(inline(esc(st[4:])), styles['h3'])); i += 1; continue
+                flush_para(); flow.append(Paragraph(inline_html(st[4:]), styles['h3'])); i += 1; continue
+            if st.startswith('#### '):
+                flush_para(); flow.append(Paragraph(inline_html(st[5:]), styles['h3'])); i += 1; continue
+
+            # 引用
             if st.startswith('> '):
-                flush_para(); flow.append(Paragraph(inline(esc(st[2:])), styles['quote'])); i += 1; continue
+                flush_para(); flow.append(Paragraph(inline_html(st[2:]), styles['quote'])); i += 1; continue
+
+            # 有序列表
             m = re.match(r'^(\d+)\.\s+(.*)$', st)
             if m:
-                flush_para(); flow.append(Paragraph('%s. %s' % (m.group(1), inline(esc(m.group(2)))), styles['li_num'])); i += 1; continue
+                flush_para()
+                flow.append(Paragraph('%s. %s' % (m.group(1), inline_html(m.group(2))), styles['li_num']))
+                i += 1; continue
+
+            # 无序列表
             if st.startswith('- ') or st.startswith('* '):
-                flush_para(); flow.append(Paragraph('- ' + inline(esc(st[2:])), styles['li'])); i += 1; continue
+                flush_para()
+                flow.append(Paragraph('- ' + inline_html(st[2:]), styles['li']))
+                i += 1; continue
+
+            # 普通段落
             para_buf.append(line)
             i += 1
+
         flush_para()
         if in_code and code_buf:
             flow.append(Preformatted('\n'.join(code_buf), styles['code']))

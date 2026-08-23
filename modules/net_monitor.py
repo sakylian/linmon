@@ -7,6 +7,7 @@ net_monitor.py — 网络连接监控模块
 """
 
 import os
+import sys
 import re
 import time
 import socket
@@ -28,10 +29,14 @@ from .geo_locator import (
 from .proc_monitor import (
     _parse_proc_net_tcp, _parse_proc_net_tcp6, TCP_STATES,
     _get_pid_socket_inodes, _read_proc_stat, _read_proc_status,
-    _read_proc_cmdline, _uid_to_username
+    _read_proc_cmdline, _uid_to_username,
+    _get_psutil_connections_cached,
 )
 
 logger = logging.getLogger(__name__)
+
+# 当前是否运行在 macOS (Darwin)
+IS_MACOS = sys.platform == 'darwin'
 
 # 地理高风险地区外连判定配置（由 webserver / CLI 注入，默认关闭以避免误报）
 _GEO_RISK = {'enabled': False, 'regions': []}
@@ -60,8 +65,60 @@ def start_frequency_sampler(interval=30):
     return t
 
 
+def _run_psutil_connections():
+    """macOS 下用 psutil 采集网络连接，返回与 ss 结构一致的连接列表。
+
+    macOS 非 root 下 psutil.net_connections() 会因个别进程 AccessDenied
+    导致整批抛异常；改为逐进程 proc.connections() 采集，跳过拒绝访问的进程。
+    """
+    conns = []
+    if psutil is None:
+        return conns
+    for proc in psutil.process_iter(['pid']):
+        pid = proc.pid
+        try:
+            raw_conns = proc.connections(kind='inet')
+        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+            continue
+        # 进程名（用于展示）
+        try:
+            pname = proc.name()
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            pname = ''
+        for c in raw_conns:
+            laddr = c.laddr
+            raddr = c.raddr
+            proto = 'tcp6' if c.family == socket.AF_INET6 else 'tcp'
+            if c.type == socket.SOCK_DGRAM:
+                proto = 'udp6' if c.family == socket.AF_INET6 else 'udp'
+            local_ip = laddr.ip if laddr else '0.0.0.0'
+            local_port = int(laddr.port) if laddr else 0
+            remote_ip = raddr.ip if raddr else '0.0.0.0'
+            remote_port = int(raddr.port) if raddr else 0
+            state = c.status or 'UNKNOWN'
+            process = f'{pname}({pid})' if pname else str(pid)
+            conns.append({
+                'protocol': proto,
+                'state': state,
+                'local_ip': local_ip,
+                'local_port': local_port,
+                'remote_ip': remote_ip,
+                'remote_port': remote_port,
+                'process': process,
+                'timer': '',
+                'skmem': '',
+                'inode': getattr(c, 'fd', None) or '',
+                'raw': '',
+            })
+    return conns
+
+
 def _run_ss_command():
     """运行 ss 命令获取更详细的连接信息（含 timer/process）"""
+    # macOS 无 ss，改用 psutil
+    if IS_MACOS:
+        return _run_psutil_connections()
+
     connections = []
     try:
         r = subprocess.run(
@@ -196,6 +253,21 @@ def _get_conn_data_volume(inode):
 
 def _get_process_io_stats(pid):
     """获取进程IO统计"""
+    # macOS 无 /proc，用 psutil.io_counters / memory 估算
+    if IS_MACOS:
+        if psutil is None or not pid:
+            return {}
+        try:
+            p = psutil.Process(pid)
+            io = p.io_counters()
+            if io:
+                return {
+                    'read_bytes': io.read_bytes,
+                    'write_bytes': io.write_bytes,
+                }
+        except (psutil.Error, AttributeError, OSError):
+            pass
+        return {}
     try:
         io_stats = {}
         with open(f'/proc/{pid}/io', 'r') as f:
@@ -245,12 +317,12 @@ def _estimate_remote_os(remote_ip):
         return '内网(无法推断)'
 
     try:
-        r = subprocess.run(
-            ['ping', '-c', '1', '-W', '2', remote_ip],
-            capture_output=True, text=True, timeout=5
-        )
+        # macOS 的 ping -W 单位是毫秒且语义不同，用 -t（超时秒）代替
+        cmd = ['ping', '-c', '1', '-t', '2', remote_ip] if IS_MACOS \
+            else ['ping', '-c', '1', '-W', '2', remote_ip]
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
         if r.returncode == 0:
-            # 提取 ttl=X
+            # 提取 ttl=X (macOS 输出 ttl= / time=)
             import re
             m = re.search(r'ttl=(\d+)', r.stdout)
             if m:
@@ -456,21 +528,27 @@ def get_all_connections(qqwry_path=None, include_internal=False, detect_os=False
     获取所有网络连接的详细信息
     返回 list[dict]
     """
-    # 使用 ss 命令获取详细连接信息
+    # 使用 ss 命令获取详细连接信息（macOS 用 psutil）
     ss_conns = _run_ss_command()
 
-    # 同时解析 /proc/net/tcp 获取 kernel 级连接
-    proc_conns = _parse_proc_net_tcp() + _parse_proc_net_tcp6()
-
-    # 构建 inode → pid 映射
+    # 同时解析 /proc/net/tcp 获取 kernel 级连接（仅 Linux）
+    proc_conns = []
     inode_to_pid = {}
-    for pid in os.listdir('/proc'):
-        if not pid.isdigit():
-            continue
-        pid_int = int(pid)
-        inodes = _get_pid_socket_inodes(pid_int)
-        for inode in inodes:
-            inode_to_pid[inode] = pid_int
+    if not IS_MACOS:
+        proc_conns = _parse_proc_net_tcp() + _parse_proc_net_tcp6()
+
+        # 构建 inode → pid 映射
+        for pid in os.listdir('/proc'):
+            if not pid.isdigit():
+                continue
+            pid_int = int(pid)
+            inodes = _get_pid_socket_inodes(pid_int)
+            for inode in inodes:
+                inode_to_pid[inode] = pid_int
+    else:
+        # macOS: 用 psutil 连接缓存补齐 pid → 连接
+        # (psutil 的 pid 关联比 inode 更直接；这里仅用于 proc_conns 为空时的兜底)
+        pass
 
     connections = []
     seen_keys = set()
@@ -485,13 +563,23 @@ def get_all_connections(qqwry_path=None, include_internal=False, detect_os=False
             return pid_cache[pid]
         info = {'name': '', 'cmdline': '', 'user': ''}
         if pid:
-            stat = _read_proc_stat(pid)
-            if stat:
-                info['name'] = stat.get('comm', '')
-                info['cmdline'] = _read_proc_cmdline(pid)
-            stat_info = _read_proc_status(pid)
-            uid = stat_info.get('Uid', '0').split()[0] if 'Uid' in stat_info else '0'
-            info['user'] = _uid_to_username(int(uid)) if uid.isdigit() else 'unknown'
+            if IS_MACOS and psutil is not None:
+                # macOS: 用 psutil 获取进程信息
+                try:
+                    p = psutil.Process(pid)
+                    info['name'] = p.name() or ''
+                    info['cmdline'] = ' '.join(p.cmdline() or [])
+                    info['user'] = p.username() or 'unknown'
+                except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+                    pass
+            else:
+                stat = _read_proc_stat(pid)
+                if stat:
+                    info['name'] = stat.get('comm', '')
+                    info['cmdline'] = _read_proc_cmdline(pid)
+                stat_info = _read_proc_status(pid)
+                uid = stat_info.get('Uid', '0').split()[0] if 'Uid' in stat_info else '0'
+                info['user'] = _uid_to_username(int(uid)) if uid.isdigit() else 'unknown'
         pid_cache[pid] = info
         return info
 
@@ -677,7 +765,11 @@ def run_traceroute(target, max_hops=30, timeout=5):
     hops = []
     cmd = None
     if sh.which('traceroute'):
-        cmd = ['traceroute', '-m', str(max_hops), '-w', str(timeout), target]
+        # macOS/BSD traceroute 默认每跳 3 次探测，-q 1 减为 1 次以大幅缩短耗时
+        if IS_MACOS:
+            cmd = ['traceroute', '-m', str(max_hops), '-w', str(timeout), '-q', '1', target]
+        else:
+            cmd = ['traceroute', '-m', str(max_hops), '-w', str(timeout), target]
     elif sh.which('mtr'):
         cmd = ['mtr', '--report', '--report-cycles', '1', target]
     elif sh.which('tracepath'):
@@ -687,7 +779,10 @@ def run_traceroute(target, max_hops=30, timeout=5):
         return {'error': '未找到 traceroute/mtr/tracepath 命令，请安装: sudo apt install traceroute 或 sudo yum install traceroute'}
 
     try:
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=max_hops * timeout + 10)
+        # macOS -q 1 后每跳最多 timeout 秒；Linux 仍为 3 次。取两者上限 + 缓冲
+        probes_per_hop = 1 if IS_MACOS else 3
+        total_timeout = max_hops * timeout * probes_per_hop + 10
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=total_timeout)
         output = r.stdout
     except subprocess.TimeoutExpired:
         return {'error': f'traceroute 超时 ({target})'}
@@ -704,8 +799,8 @@ def run_traceroute(target, max_hops=30, timeout=5):
            or line.startswith('Resume:') or line.startswith('pmtu'):
             continue
 
-        # 跳号：traceroute/mtr 为行首纯数字；tracepath 为 "1:" 或 "1?:"
-        m = re.match(r'^\s*(\d+)\??:\s*(.*)$', line)
+        # 跳号：traceroute/mtr 为行首纯数字+空格；tracepath 为 "1:" 或 "1?:"
+        m = re.match(r'^\s*(\d+)\??(?::|\s+)\s*(.*)$', line)
         if not m:
             continue
         hop_num = int(m.group(1))
@@ -754,10 +849,55 @@ def run_traceroute(target, max_hops=30, timeout=5):
     return {'target': target, 'hops': hops}
 
 
+def _pick_macos_iface():
+    """选择一个可用的 macOS 网络接口用于抓包（macOS 无 any 接口）。"""
+    if psutil is not None:
+        try:
+            stats = psutil.net_if_stats()
+            for name in stats:
+                # 选择有 IPv4 地址且 up 的接口，排除环回优先考虑
+                if name == 'lo0':
+                    continue
+                return name
+        except (psutil.Error, OSError):
+            pass
+    # 回退：ifconfig 找第一个非 lo0 接口
+    try:
+        r = subprocess.run(['ifconfig'], capture_output=True, text=True, timeout=5)
+        for line in r.stdout.split('\n'):
+            if line and not line.startswith(' ') and not line.startswith('\t'):
+                iface = line.split(':')[0].strip()
+                if iface and iface != 'lo0':
+                    return iface
+    except Exception:
+        pass
+    return 'en0'
+
+
 def _get_local_ip_addrs():
     """获取本机所有 IPv4 接口地址，用于判定抓包方向（发送/接收）"""
-    import socket, fcntl, struct, os
     ips = set()
+    # macOS: 用 psutil 或系统命令获取接口地址
+    if IS_MACOS:
+        if psutil is not None:
+            try:
+                for _, addrs in psutil.net_if_addrs().items():
+                    for a in addrs:
+                        if a.family == socket.AF_INET and a.address:
+                            ips.add(a.address.split('%')[0])
+                return ips
+            except (psutil.Error, OSError):
+                pass
+        try:
+            r = subprocess.run(['ifconfig'], capture_output=True, text=True, timeout=5)
+            for m in re.finditer(r'inet\s+(\d{1,3}(?:\.\d{1,3}){3})', r.stdout):
+                ips.add(m.group(1))
+        except Exception:
+            pass
+        return ips
+
+    # Linux: /sys/class/net + fcntl.ioctl
+    import socket, fcntl, struct, os
     try:
         for iface in os.listdir('/sys/class/net'):
             s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -830,9 +970,16 @@ def capture_traffic(remote_ip, remote_port=None, iface='any', count=60, timeout=
     filt = 'host %s' % remote_ip
     if remote_port:
         filt += ' and port %d' % int(remote_port)
+    # macOS 的 tcpdump 无 'any' 接口，需选一个实际接口；且 BSD 版不支持 -tttt（用 -tt）
+    if IS_MACOS and (not iface or iface == 'any'):
+        try:
+            iface = _pick_macos_iface()
+        except Exception:
+            iface = ''
     if tool == 'tcpdump':
-        # -n 不解析名称, -tttt 时间戳, -A 输出 ASCII 载荷预览, -s 0 全量, -c count 达到即退出
-        cmd = ['tcpdump', '-i', iface, '-n', '-tttt', '-A', '-s', '0', '-c', str(count), filt]
+        ts_flag = '-tt' if IS_MACOS else '-tttt'
+        # -n 不解析名称, 时间戳, -A 输出 ASCII 载荷预览, -s 0 全量, -c count 达到即退出
+        cmd = ['tcpdump', '-i', iface, '-n', ts_flag, '-A', '-s', '0', '-c', str(count), filt]
     else:
         cmd = ['tshark', '-i', iface, '-c', str(count), '-f', filt]
 

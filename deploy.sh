@@ -50,7 +50,9 @@ done
 
 # ---------- 检测发行版 ----------
 detect_distro() {
-    if [ -f /etc/debian_version ]; then
+    if [ "$(uname -s)" = "Darwin" ]; then
+        echo "macos"
+    elif [ -f /etc/debian_version ]; then
         echo "debian"
     elif [ -f /etc/redhat-release ]; then
         echo "rhel"
@@ -64,7 +66,15 @@ detect_distro() {
 DISTRO=$(detect_distro)
 
 # ---------- 检测包管理器 ----------
-if command -v apt-get &>/dev/null; then
+if [ "$DISTRO" = "macos" ]; then
+    if command -v brew &>/dev/null; then
+        PKG_MGR="brew"
+    else
+        error "macOS 需要 Homebrew 安装系统依赖，请先安装: https://brew.sh"
+        # 允许跳过，后续 python3 已存在则继续
+        PKG_MGR="brew"
+    fi
+elif command -v apt-get &>/dev/null; then
     PKG_MGR="apt-get"
 elif command -v dnf &>/dev/null; then
     PKG_MGR="dnf"
@@ -73,14 +83,18 @@ elif command -v yum &>/dev/null; then
 elif command -v pacman &>/dev/null; then
     PKG_MGR="pacman"
 else
-    error "未检测到支持的包管理器 (apt/dnf/yum/pacman)"
+    error "未检测到支持的包管理器 (apt/dnf/yum/pacman/brew)"
     exit 1
 fi
 
 echo ""
 echo "============================================================"
 echo "  linmon 一键部署"
-echo "  发行版:  $(cat /etc/os-release 2>/dev/null | grep PRETTY_NAME | cut -d'"' -f2 || echo "$DISTRO")"
+if [ "$DISTRO" = "macos" ]; then
+    echo "  系统:     macOS ($(sw_vers -productVersion 2>/dev/null || echo '未知'))"
+else
+    echo "  发行版:  $(cat /etc/os-release 2>/dev/null | grep PRETTY_NAME | cut -d'"' -f2 || echo "$DISTRO")"
+fi
 echo "  包管理:  $PKG_MGR"
 echo "  安装目录: $INSTALL_DIR"
 echo "============================================================"
@@ -105,6 +119,10 @@ step "2/7 安装系统依赖 (iproute2/traceroute/python3)"
 
 SYS_PKGS=""
 case "$PKG_MGR" in
+    brew)
+        # macOS: traceroute 系统自带；tcpdump 需安装或使用自带；netstat/route 自带
+        SYS_PKGS="python3 traceroute tcpdump"
+        ;;
     apt-get)
         SYS_PKGS="python3 python3-pip iproute2 traceroute net-tools"
         $PKG_MGR update -qq 2>/dev/null || true
@@ -120,9 +138,15 @@ esac
 # 用户级安装不做 apt install (无权限), 只检查是否已有
 if [ "$USER_INSTALL" = true ]; then
     MISSING=""
-    for pkg_check in python3 ss traceroute; do
+    for pkg_check in python3 traceroute; do
         command -v $pkg_check &>/dev/null || MISSING="$MISSING $pkg_check"
     done
+    # macOS 没有 ss 命令，改查 netstat；Linux 查 ss
+    if [ "$DISTRO" = "macos" ]; then
+        command -v netstat &>/dev/null || MISSING="$MISSING netstat"
+    else
+        command -v ss &>/dev/null || MISSING="$MISSING ss"
+    fi
     if [ -n "$MISSING" ]; then
         warn "缺少系统命令:$MISSING, 请联系管理员安装: $PKG_MGR install$MISSING"
     else

@@ -23,7 +23,14 @@ from modules.ai_analyzer import get_analyzer
 from modules.net_monitor import configure_geo_risk
 from modules.audit import log_event
 
-VERSION = 'linmon v1.0 (Linux Edition)'
+import platform as _platform
+
+if _platform.system() == 'Darwin':
+    _EDITION = 'macOS Edition'
+else:
+    _EDITION = 'Linux Edition'
+
+VERSION = f'linmon v1.0 ({_EDITION})'
 
 
 def _confirm_ai_send(analyzer, processes, connections, force=False):
@@ -415,7 +422,7 @@ def cmd_ai_config(args):
 def main():
     parser = argparse.ArgumentParser(
         prog='linmon',
-        description=f'{VERSION} — Linux进程与网络连接安全监控工具',
+        description=f'{VERSION} — 进程与网络连接安全监控工具',
         formatter_class=argparse.RawTextHelpFormatter
     )
     subparsers = parser.add_subparsers(dest='command', help='子命令')

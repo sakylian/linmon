@@ -3,6 +3,8 @@ __pycache__/
 *.pyc
 *.pyo
 venv/
+.venv/
+.temp/
 
 # AI配置（含密钥，勿传）
 config/ai_config.json

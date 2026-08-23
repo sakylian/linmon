@@ -3,18 +3,18 @@ AIGC:
   ContentProducer: '001191110102MAD55U9H0F10002'
   ContentPropagator: '001191110102MAD55U9H0F10002'
   Label: '1'
-  ProduceID: '50b54687-a620-42dd-ad4f-ccd7f4cd77cd'
-  PropagateID: '50b54687-a620-42dd-ad4f-ccd7f4cd77cd'
-  ReservedCode1: '6773d34a-8602-47c5-bc30-aeee86555d9b'
-  ReservedCode2: '6773d34a-8602-47c5-bc30-aeee86555d9b'
+  ProduceID: '0f6aa18f-bf74-4838-bf59-37019c46551e'
+  PropagateID: '0f6aa18f-bf74-4838-bf59-37019c46551e'
+  ReservedCode1: '749ae84a-59ea-451a-aee4-8a21b8e28ddc'
+  ReservedCode2: '749ae84a-59ea-451a-aee4-8a21b8e28ddc'
 ---
 
-# linmon — Linux 进程与网络连接安全监控工具
+# linmon — Linux / macOS 进程与网络连接安全监控工具
 
 初学Linux的朋友，看着满屏的ps信息或者ss网络连接，蒙了，咋看？怎么了解哪些进程可能存在问题？有时候真心想呼唤火绒杀毒软件里面的一个组成部分：火绒剑，来帮你披荆斩棘，看清系统里面究竟在运行什么。
 我用中国电信的星辰超级智能体（TeleAgent）制作了这个工具，希望能够帮到你。
 
-轻量级 Linux 安全监控工具，提供命令行和 Web 面板两种使用方式。实时采集系统进程、网络连接信息，结合本地规则引擎和可选的 AI 分析，帮助快速发现可疑进程、异常网络外连等安全隐患。
+轻量级 Linux / macOS 安全监控工具，提供命令行和 Web 面板两种使用方式。实时采集系统进程、网络连接信息，结合本地规则引擎和可选的 AI 分析，帮助快速发现可疑进程、异常网络外连等安全隐患。
 
 ## 功能特性
 
@@ -25,7 +25,7 @@ AIGC:
 - **路由跟踪**：逐跳显示路由路径及每跳的 IP 归属地，自动兼容 `traceroute`/`mtr`/`tracepath` 输出格式（含 `no reply` 跳与私网跳），可选 AI 分析路由安全性
 - **AI 安全分析**：接入大语言模型，对高危进程、可疑连接生成结构化安全分析报告，给出风险评级和处置建议
 - **Web 监控面板**：实时刷新的仪表盘界面，支持表头排序、自动刷新、一键复制 kill 命令、AI 分析弹窗
-- **多发行版适配**：自动检测 Debian / RHEL / Arch / SUSE 系发行版，适配不同的包管理器和服务管理器
+- **多平台适配**：Linux（Debian/RHEL/Arch/SUSE）与 macOS（Homebrew），自动检测发行版和包管理器
 
 ## 截图
 
@@ -82,8 +82,8 @@ python webserver.py            # Web 模式，访问 http://localhost:8765
 ### 系统依赖
 
 - Python >= 3.8
-- `iproute2`（提供 `ss` 命令，网络连接扫描依赖）
-- `traceroute`/`mtr`/`tracepath`（路由跟踪功能依赖，任一即可）
+- `iproute2`（提供 `ss` 命令，网络连接扫描依赖）或 macOS 自带 `netstat`
+- `traceroute`/`mtr`/`tracepath`（路由跟踪功能依赖，任一即可；macOS 自带 `traceroute`）
 - `tcpdump` 或 `tshark`（连接抓包分析依赖，需 root 运行 Web 服务）
 
 Debian / Ubuntu：
@@ -95,6 +95,29 @@ RHEL / CentOS / Rocky：
 ```bash
 sudo dnf install python3 python3-pip iproute traceroute net-tools
 ```
+
+macOS：
+```bash
+# 系统自带 python3、traceroute、netstat；如需 tcpdump 抓包功能：
+brew install python3 tcpdump
+```
+
+RHEL / CentOS / Rocky：
+```bash
+sudo dnf install python3 python3-pip iproute traceroute net-tools
+```
+
+macOS（Homebrew）：
+```bash
+brew install python3 traceroute tcpdump
+```
+
+> **macOS 注意事项**：
+> - macOS 自带 `netstat`/`route`/`traceroute`，无需 `iproute2`/`ss`。
+> - 非root用户下 `psutil.net_connections()` 可能因个别进程拒绝访问而整批失败，程序已改为逐进程遍历以规避此问题，但部分系统进程的网络连接仍需 `sudo` 才能采集。
+> - macOS 的 `traceroute` 默认每跳 3 次探测，程序已自动加 `-q 1` 提速。
+> - 建议使用项目内 `.venv` 虚拟环境（`python3 -m venv .venv && .venv/bin/pip install -r requirements.txt`）。
+> - AI 分析：`ai.ctaigw.cn` 的 TLS 1.3 与部分 Python OpenSSL 版本握手不兼容，程序已自动限制 TLS 1.2。
 
 ## 命令行用法
 
@@ -275,8 +298,19 @@ linmon/
 - 一键部署脚本 deploy.sh + 命令安装脚本 install.sh
 - CLI 命令包装：linmon / linmon-web 全局命令
 
+### macOS 适配
+
+- 全平台支持：macOS（Apple Silicon / Intel）+ Linux 多发行版
+- 进程/网络监控模块使用 psutil 跨平台能力，替代 `/proc`/`ss` 等 Linux 专有机制
+- traceroute 兼容 BSD 格式（`-q 1` 单次探测提速）
+- AI 分析模块自动降级 TLS 1.2，解决部分 AI 网关 TLS 1.3 握手不兼容问题
+- 系统诊断模块识别 macOS 特有组件（brew / launchd / launchctl）
+- deploy.sh 支持 macOS（Homebrew 包管理、跳过 systemd）
+- Web 面板标题动态显示 "macOS Edition" / "Linux Edition"
+
 ### 近期更新
 
+- **macOS 适配**：全面支持 macOS（Apple Silicon / Intel），包括进程/网络监控、路由跟踪（`traceroute -q 1`）、系统诊断、Web 面板、AI 分析（TLS 1.2 兼容修复）；`deploy.sh` 支持 Homebrew 自动安装系统依赖
 - **CDN 标注层**：抓包分析时自动从载荷提取 SNI/Host 域名并匹配 CDN/云厂商（内置覆盖层补充腾讯云 `myqcloud.com`/`qcloudcdn.com` 等常见域名）；命中时在 Web 面板提示该 IP 归属地为 CDN 边缘节点、不可直接用于"境内/境外"判定（修正 geo 库把国内 CDN 节点误标为境外的偏差）
 - **IPv6 归属地查询**：新增 `ipv6wry.db`（ZX.IPv6）支持，`/64` 前缀索引解析
 - **AI 安全报告导出**：Web 面板可在 AI 分析后一键导出 **Markdown (.md)** 或 **PDF (.pdf)**（后端 `reportlab` 生成，中文用内置 CID 字体）
@@ -289,12 +323,17 @@ linmon/
 - **IP 归属地**：纯真 IP 数据库（qqwry.dat）
 - **AI 分析**：兼容 OpenAI API 格式的大语言模型
 
-## 支持的 Linux 发行版
+## 支持的平台
 
+**Linux**：
 - Debian / Ubuntu / LinuxMint / Kali / Raspbian
 - RHEL / CentOS / Rocky / AlmaLinux / Fedora
 - Arch / Manjaro
 - openSUSE / SLES
+
+**macOS**：
+- macOS 12+（Apple Silicon / Intel）
+- 需安装 [Homebrew](https://brew.sh)
 
 ## License
 

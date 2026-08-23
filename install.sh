@@ -18,7 +18,11 @@ info()  { echo -e "${GREEN}[✓]${NC} $1"; }
 error() { echo -e "${RED}[✗]${NC} $1"; }
 
 # 解析项目真实路径（处理软链接情况）
-PROJECT_DIR="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
+if command -v realpath >/dev/null 2>&1; then
+    PROJECT_DIR="$(cd "$(dirname "$(realpath "$0")")" && pwd)"
+else
+    PROJECT_DIR="$(cd "$(dirname "$0")" && pwd)"
+fi
 
 # 安装模式
 USER_INSTALL=false
@@ -39,7 +43,11 @@ if [ ! -f "$LINMON_WEB" ]; then
     cat > "$LINMON_WEB" <<EOF
 #!/bin/bash
 # linmon-web 命令包装脚本
-SCRIPT_PATH="\$(readlink -f "\$0")"
+if command -v realpath >/dev/null 2>&1; then
+    SCRIPT_PATH="\$(realpath "\$0")"
+else
+    SCRIPT_PATH="\$(cd "\$(dirname "\$0")" && pwd)/\$(basename "\$0")"
+fi
 SCRIPT_DIR="\$(dirname "\$SCRIPT_PATH")"
 
 if [ -f "\$SCRIPT_DIR/venv/bin/python3" ]; then

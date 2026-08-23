@@ -27,6 +27,9 @@ from modules.distro_helper import get_distro
 from modules.ai_analyzer import get_analyzer
 from modules.audit import log_event
 
+# 是否运行在 macOS (Darwin)
+IS_MACOS = sys.platform == 'darwin'
+
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__, template_folder='templates')
@@ -91,13 +94,31 @@ def _get_home_coordinate(cfg):
     """
     configured = cfg.get('home_coord') or [104.0, 35.0]
     try:
-        out = subprocess.run(['ip', 'route', 'get', '1.1.1.1'],
-                             capture_output=True, text=True, timeout=3)
-        m = re.search(r'src\s+(\d{1,3}(?:\.\d{1,3}){3})', out.stdout)
-        if m and is_valid_public_ip(m.group(1)):
-            g = GeoLocator.lookup_ip(m.group(1))
-            if g.get('lng') is not None and g.get('lat') is not None:
-                return [g['lng'], g['lat']], g.get('geo_str') or '本机'
+        # macOS 用 route get 探测出口 IP（无 ip 命令）；Linux 用 ip route get
+        if IS_MACOS:
+            out = subprocess.run(['route', '-n', 'get', '1.1.1.1'],
+                                 capture_output=True, text=True, timeout=3)
+            m = re.search(r'interface:\s*\S+\s*\n\s*gateway:\s+(\d{1,3}(?:\.\d{1,3}){3})', out.stdout)
+            # 也可能直接拿不到公网IP，走默认配置
+            pub = None
+            if m:
+                pub = m.group(1)
+            else:
+                m2 = re.search(r'source:\s+(\d{1,3}(?:\.\d{1,3}){3})', out.stdout)
+                if m2:
+                    pub = m2.group(1)
+            if pub and is_valid_public_ip(pub):
+                g = GeoLocator.lookup_ip(pub)
+                if g.get('lng') is not None and g.get('lat') is not None:
+                    return [g['lng'], g['lat']], g.get('geo_str') or '本机'
+        else:
+            out = subprocess.run(['ip', 'route', 'get', '1.1.1.1'],
+                                 capture_output=True, text=True, timeout=3)
+            m = re.search(r'src\s+(\d{1,3}(?:\.\d{1,3}){3})', out.stdout)
+            if m and is_valid_public_ip(m.group(1)):
+                g = GeoLocator.lookup_ip(m.group(1))
+                if g.get('lng') is not None and g.get('lat') is not None:
+                    return [g['lng'], g['lat']], g.get('geo_str') or '本机'
     except Exception:
         logger.debug('探测本机出口IP坐标失败，回退到配置坐标', exc_info=True)
     return configured, '本机'
@@ -174,7 +195,8 @@ def _refresh_data(force=False):
 
 @app.route('/')
 def index():
-    return render_template('index.html')
+    edition = 'macOS' if IS_MACOS else 'Linux'
+    return render_template('index.html', edition=edition)
 
 
 @app.route('/api/sysinfo')

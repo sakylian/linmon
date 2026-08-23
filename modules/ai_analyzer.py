@@ -10,6 +10,7 @@ import os
 import re
 import json
 import time
+import ssl
 import secrets
 import logging
 import urllib.request
@@ -202,8 +203,13 @@ class AIAnalyzer:
 
         req = urllib.request.Request(endpoint, data=payload, headers=headers, method='POST')
 
+        # 某些服务器（如 ai.ctaigw.cn）的 TLS 1.3 握手与 Python ssl 模块不兼容，
+        # 会超时或报 UNEXPECTED_EOF；限制为 TLS 1.2 即可稳定连接。
+        ssl_ctx = ssl.create_default_context()
+        ssl_ctx.maximum_version = ssl.TLSVersion.TLSv1_2
+
         try:
-            with urllib.request.urlopen(req, timeout=self.config.get('timeout', 60)) as resp:
+            with urllib.request.urlopen(req, timeout=self.config.get('timeout', 60), context=ssl_ctx) as resp:
                 result = json.loads(resp.read().decode('utf-8'))
                 # 兼容 OpenAI 与 Anthropic 返回格式
                 if 'choices' in result and result['choices']:
@@ -282,7 +288,7 @@ class AIAnalyzer:
             }
 
         system_prompt = (
-            '你是一名专业的Linux系统安全分析师。请根据提供的进程信息，分析该进程是否存在安全风险，'
+            '你是一名专业的系统安全分析师。请根据提供的进程信息，分析该进程是否存在安全风险，'
             '给出风险等级（高危/中危/低危/安全）、具体原因和处置建议。'
             '分析要点：\n'
             '1. 进程名是否为已知恶意软件或后门工具\n'
@@ -358,7 +364,7 @@ class AIAnalyzer:
         # 命令行脱敏（可能含密码/令牌）
         cmdline = self._redact(p.get('cmdline', '未知'))
         lines = [
-            '请分析以下Linux进程的安全风险：',
+            '请分析以下进程的安全风险：',
             '',
             f'进程名: {p.get("name", "未知")}',
             f'PID: {p.get("pid", "未知")}',
@@ -399,7 +405,7 @@ class AIAnalyzer:
         local_addr = f'{c.get("local_ip", "")}:{c.get("local_port", "")}' if send_internal else f'<本机>:{c.get("local_port", "")}'
         process_cmdline = self._redact(c.get('process_cmdline', '未知'))
         lines = [
-            '请分析以下Linux网络连接的安全风险：',
+            '请分析以下网络连接的安全风险：',
             '',
             f'协议: {c.get("protocol", "未知")}',
             f'状态: {c.get("state", "未知")}',
@@ -450,7 +456,7 @@ class AIAnalyzer:
             }
 
         system_prompt = (
-            '你是一名专业的Linux系统安全审计专家。请对以下系统进程和网络连接进行全面安全分析，'
+            '你是一名专业的系统安全审计专家。请对以下系统进程和网络连接进行全面安全分析，'
             '生成一份安全审计报告。报告应包含：\n'
             '1. 总体安全评估（安全/需关注/存在风险/高危）\n'
             '2. 高危项目清单及详细分析\n'
