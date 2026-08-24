@@ -15,6 +15,7 @@ import secrets
 import logging
 import urllib.request
 import urllib.error
+import urllib.parse
 from pathlib import Path
 
 from .audit import log_event
@@ -51,6 +52,10 @@ DEFAULT_CONFIG = {
     # 地理高风险地区外连判定（本地规则，默认关闭以避免误报；启用需配置 high_risk_regions）
     'geo_risk_enabled': False,
     'high_risk_regions': [],
+    # 星辰网关当前证书使用较弱的密钥。仅在严格校验明确报
+    # EE certificate key too weak 时，对同一主机降低 OpenSSL security level
+    # 后重试一次；证书链与主机名校验仍保持开启。可设为 false 禁用。
+    'legacy_tls_fallback': True,
 }
 
 # 敏感字段脱敏正则：匹配 key=value / key: value / key value 形式，遮蔽其取值
@@ -208,8 +213,29 @@ class AIAnalyzer:
         ssl_ctx = ssl.create_default_context()
         ssl_ctx.maximum_version = ssl.TLSVersion.TLSv1_2
 
+        timeout = self.config.get('timeout', 60)
+
+        def _open_request():
+            try:
+                return urllib.request.urlopen(req, timeout=timeout, context=ssl_ctx)
+            except urllib.error.URLError as exc:
+                reason = str(getattr(exc, 'reason', exc))
+                host = (urllib.parse.urlparse(endpoint).hostname or '').lower()
+                weak_key = 'ee certificate key too weak' in reason.lower()
+                allowed_host = host == 'ai.ctaigw.cn'
+                if not (weak_key and allowed_host and self.config.get('legacy_tls_fallback', True)):
+                    raise
+
+                # 仅降低密钥强度门槛；仍使用系统 CA、校验证书链和主机名。
+                legacy_ctx = ssl.create_default_context()
+                legacy_ctx.maximum_version = ssl.TLSVersion.TLSv1_2
+                legacy_ctx.set_ciphers('DEFAULT@SECLEVEL=1')
+                logger.warning('AI 网关证书密钥过弱，使用受限 TLS 兼容模式重试: %s', host)
+                log_event('ai_tls_legacy_retry', f'host={host} verify_chain=true verify_hostname=true')
+                return urllib.request.urlopen(req, timeout=timeout, context=legacy_ctx)
+
         try:
-            with urllib.request.urlopen(req, timeout=self.config.get('timeout', 60), context=ssl_ctx) as resp:
+            with _open_request() as resp:
                 result = json.loads(resp.read().decode('utf-8'))
                 # 兼容 OpenAI 与 Anthropic 返回格式
                 if 'choices' in result and result['choices']:
@@ -357,6 +383,37 @@ class AIAnalyzer:
                 results.append(self.analyze_connection(item))
             results.append(None)  # separator
         return [r for r in results if r is not None]
+
+    def analyze_tracking_report(self, report):
+        """Use the configured model to turn a local tracking summary into advice.
+
+        Only aggregate counters and public endpoints are sent; observed local
+        file paths are intentionally excluded to reduce privacy exposure.
+        """
+        if not self.is_external_allowed():
+            log_event('ai_send_blocked', 'type=process_tracking (allow_external_ai=false)')
+            return {'success': False, 'error': '外部AI分析已禁用，本次未发送任何数据。',
+                    'analysis': '', 'offline': True}
+        if not self.is_enabled():
+            return {'success': False, 'error': 'AI分析未启用', 'analysis': ''}
+        tracking = report.get('tracking', {})
+        net = tracking.get('network', {})
+        endpoints = [e for e in net.get('endpoints', []) if e.get('public')][:30]
+        prompt = '\n'.join([
+            '请根据以下可疑进程的本地采样摘要，写一份电脑初学者能看懂的简短安全报告。',
+            '请说明风险判断、可能的正常解释、立即可做的安全操作；不要断言它一定是恶意软件。',
+            f"进程: {tracking.get('process_name')} (PID {tracking.get('pid')})",
+            f"跟踪状态/时长: {tracking.get('status')} / {tracking.get('elapsed_seconds')} 秒",
+            f"采样次数: {tracking.get('sample_count')}",
+            f"观察到的不同打开文件数: {tracking.get('files', {}).get('unique_observed', 0)}",
+            f"进程IO增量: {json.dumps(tracking.get('io_delta', {}), ensure_ascii=False)}",
+            f"CPU: {json.dumps(tracking.get('cpu', {}), ensure_ascii=False)}",
+            f"公网对端及出现次数: {json.dumps(endpoints, ensure_ascii=False)}",
+            f"本地规则关注点: {json.dumps(report.get('concerns', []), ensure_ascii=False)}",
+            '注意：文件数来自周期采样，不是完整内核审计事件。',
+        ])
+        log_event('ai_send', f'type=process_tracking pid={tracking.get("pid")} endpoints={len(endpoints)}')
+        return self._call_ai(prompt, system_prompt='你是谨慎的终端安全分析助手，面向非技术用户。')
 
     def _build_process_prompt(self, p):
         """构建进程分析的 prompt（已做最小化与脱敏）"""

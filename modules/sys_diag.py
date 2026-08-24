@@ -16,6 +16,7 @@ from .proc_monitor import get_all_processes, get_system_boot_info, get_process_s
 from .net_monitor import get_all_connections, get_network_summary
 from .distro_helper import get_distro
 from .geo_locator import find_qqwry_dat
+from .health import build_health_report
 
 logger = logging.getLogger(__name__)
 
@@ -27,7 +28,7 @@ def generate_text_report(qqwry_path=None, include_internal=False, ai_report=None
     lines = []
     now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     distro = get_distro()
-    platform_name = 'macOS' if distro.get_family() == 'macos' else 'Linux'
+    platform_name = {'macos': 'macOS', 'windows': 'Windows'}.get(distro.get_family(), 'Linux')
 
     lines.append('=' * 78)
     lines.append(f'  {platform_name} 系统安全诊断报告 (linmon)')
@@ -169,6 +170,15 @@ def generate_text_report(qqwry_path=None, include_internal=False, ai_report=None
     else:
         lines.append('  [OK] 未检测到高危网络连接')
         lines.append('')
+
+    health = build_health_report(processes, connections, boot_info)
+    lines.append('  [通俗健康结论]')
+    lines.append(f'    健康分: {health["score"]}/100 — {health["headline"]}')
+    for finding in health['findings']:
+        lines.append(f'    - {finding["plain"]}')
+    for action in health['recommended_actions']:
+        lines.append(f'    建议: {action}')
+    lines.append('')
 
     # 公网连接详情
     public_conns = [c for c in connections if c['is_public']]
@@ -322,6 +332,7 @@ def generate_json_report(processes=None, connections=None, boot_info=None,
         },
         'process_summary': proc_summary,
         'network_summary': net_summary,
+        'health': build_health_report(processes, connections, boot_info),
         'processes': processes,
         'connections': connections,
     }

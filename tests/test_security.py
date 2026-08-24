@@ -17,9 +17,11 @@ from modules.geo_locator import (
     cdn_lookup,
 )
 from modules.net_monitor import (_assess_connection_risk, configure_geo_risk,
-                                 _extract_hostname_from_payload)
+                                 _extract_hostname_from_payload, get_all_connections)
 from modules.proc_monitor import _detect_high_risk, _exe_is_deleted
 from modules.report_exporter import export_markdown, export_pdf
+from modules.health import build_health_report
+from modules.runtime_identity import configure_monitor_identity, is_monitor_port
 
 # 测试用样本库（由 ip.7z 提取的 ipv6wry.db 与 cdn.yml）
 _SAMPLE_IPV6 = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
@@ -75,6 +77,36 @@ class TestPortRisk(unittest.TestCase):
         })
         self.assertEqual(level, 'low')
 
+    def test_monitor_owned_listener_is_safe(self):
+        level, reasons = _assess_connection_risk({
+            'remote_ip': '0.0.0.0', 'remote_port': 0, 'local_port': 8765,
+            'data_type_info': ('动态端口', 'low'), 'direction': 'listen',
+            'process': 'python3', 'state': 'LISTEN', 'geo': {},
+            'is_monitor_owned': True,
+        })
+        self.assertEqual(level, 'low')
+        self.assertEqual(reasons, [])
+
+    def test_runtime_identity_only_marks_registered_port(self):
+        configure_monitor_identity(pid=os.getpid(), ports=[8765])
+        self.assertTrue(is_monitor_port(8765))
+        self.assertFalse(is_monitor_port(8766))
+
+    def test_registered_monitor_port_is_annotated_without_pid(self):
+        configure_monitor_identity(pid=os.getpid(), ports=[8765])
+        raw = [{
+            'protocol': 'tcp', 'state': 'LISTEN', 'local_ip': '127.0.0.1',
+            'local_port': 8765, 'remote_ip': '0.0.0.0', 'remote_port': 0,
+            'process': '', 'timer': '', 'skmem': '', 'inode': '', 'raw': '',
+        }]
+        with mock.patch('modules.net_monitor._run_ss_command', return_value=raw), \
+                mock.patch('modules.net_monitor.IS_LINUX', False):
+            conns = get_all_connections(include_internal=True)
+        self.assertEqual(len(conns), 1)
+        self.assertTrue(conns[0]['is_monitor_owned'])
+        self.assertEqual(conns[0]['risk_level'], 'low')
+        self.assertIn('监控程序自身', conns[0]['safety_note'])
+
 
 class TestGeoRisk(unittest.TestCase):
     def tearDown(self):
@@ -99,6 +131,23 @@ class TestGeoRisk(unittest.TestCase):
             'geo': {'geo_str': '美国 加利福尼亚', 'country': '美国'},
         })
         self.assertFalse(any('高风险地区' in r for r in reasons))
+
+
+class TestBeginnerHealth(unittest.TestCase):
+    def test_monitor_items_do_not_reduce_health(self):
+        health = build_health_report(
+            [{'risk_level': 'high', 'is_monitor_owned': True}],
+            [{'risk_level': 'high', 'is_monitor_owned': True}],
+        )
+        self.assertEqual(health['score'], 100)
+        self.assertEqual(health['level'], 'healthy')
+
+    def test_real_high_risk_has_plain_language_action(self):
+        health = build_health_report(
+            [{'risk_level': 'high', 'is_monitor_owned': False, 'name': 'x', 'pid': 7}], [])
+        self.assertEqual(health['level'], 'danger')
+        self.assertLess(health['score'], 100)
+        self.assertTrue(health['recommended_actions'])
 
 
 class TestExternalSendMinimization(unittest.TestCase):
@@ -138,6 +187,70 @@ class TestExternalSendMinimization(unittest.TestCase):
         })
         self.assertNotIn('192.168.1.5', p)
         self.assertNotIn('p@ssw0rd', p)
+
+    def test_tracking_ai_does_not_send_local_file_paths(self):
+        a = AIAnalyzer()
+        a.config.update({'enabled': True, 'app_key': 'test', 'allow_external_ai': True})
+        report = {
+            'tracking': {
+                'process_name': 'demo', 'pid': 3, 'status': 'completed',
+                'elapsed_seconds': 5, 'sample_count': 2,
+                'files': {'unique_observed': 1, 'paths': ['/Users/alice/secret.txt']},
+                'io_delta': {}, 'cpu': {},
+                'network': {'endpoints': [{'remote': '1.2.3.4:443', 'public': True}]},
+            },
+            'concerns': [],
+        }
+        with mock.patch.object(a, '_call_ai', return_value={'success': True, 'analysis': 'ok'}) as call:
+            a.analyze_tracking_report(report)
+        prompt = call.call_args.args[0]
+        self.assertNotIn('/Users/alice/secret.txt', prompt)
+        self.assertIn('1.2.3.4:443', prompt)
+
+    def test_weak_gateway_certificate_uses_restricted_tls_retry(self):
+        import json as _json
+        import urllib.error
+        import ssl as _ssl
+
+        a = AIAnalyzer()
+        a.config.update({
+            'enabled': True, 'app_key': 'test',
+            'endpoint': 'https://ai.ctaigw.cn/v1/chat/completions',
+            'legacy_tls_fallback': True,
+        })
+
+        class _Response:
+            def __enter__(self): return self
+            def __exit__(self, *args): return False
+            def read(self):
+                return _json.dumps({'choices': [{'message': {'content': '连接成功'}}]}).encode()
+
+        error = urllib.error.URLError(
+            _ssl.SSLCertVerificationError(1, 'EE certificate key too weak'))
+        with mock.patch('modules.ai_analyzer.urllib.request.urlopen',
+                        side_effect=[error, _Response()]) as urlopen:
+            result = a._call_ai('test')
+        self.assertTrue(result['success'])
+        self.assertEqual(urlopen.call_count, 2)
+        retry_context = urlopen.call_args_list[1].kwargs['context']
+        self.assertTrue(retry_context.check_hostname)
+        self.assertEqual(retry_context.verify_mode, _ssl.CERT_REQUIRED)
+
+    def test_weak_certificate_fallback_is_host_scoped(self):
+        import urllib.error
+        import ssl as _ssl
+        a = AIAnalyzer()
+        a.config.update({
+            'enabled': True, 'app_key': 'test',
+            'endpoint': 'https://example.com/v1/chat/completions',
+            'legacy_tls_fallback': True,
+        })
+        error = urllib.error.URLError(
+            _ssl.SSLCertVerificationError(1, 'EE certificate key too weak'))
+        with mock.patch('modules.ai_analyzer.urllib.request.urlopen', side_effect=error) as urlopen:
+            result = a._call_ai('test')
+        self.assertFalse(result['success'])
+        self.assertEqual(urlopen.call_count, 1)
 
 
 class TestMalwareDetection(unittest.TestCase):
@@ -183,7 +296,7 @@ class TestMalwareDetection(unittest.TestCase):
     def test_root_exe_unreadable_flagged_when_scanner_root(self):
         # 扫描器本身为 root 时，root 进程 exe 不可读才是异常（降低漏报）
         p = self._base(name='weirdproc', username='root', uid=0, exe='', cmdline='')
-        with mock.patch('modules.proc_monitor.os.geteuid', return_value=0):
+        with mock.patch('modules.proc_monitor.os.geteuid', return_value=0, create=True):
             risky, level, reasons = _detect_high_risk(p)
         self.assertTrue(risky)
         self.assertTrue(any('root进程' in r for r in reasons))
@@ -191,7 +304,7 @@ class TestMalwareDetection(unittest.TestCase):
     def test_root_exe_unreadable_not_flagged_when_nonroot(self):
         # 非特权扫描器下，root 进程 exe 不可读多为权限不足，不应误报
         p = self._base(name='weirdproc', username='root', uid=0, exe='', cmdline='')
-        with mock.patch('modules.proc_monitor.os.geteuid', return_value=1000), \
+        with mock.patch('modules.proc_monitor.os.geteuid', return_value=1000, create=True), \
                 mock.patch('modules.proc_monitor._exe_is_deleted', return_value=False):
             risky, level, reasons = _detect_high_risk(p)
         self.assertFalse(risky)

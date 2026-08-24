@@ -10,6 +10,7 @@ import os
 import sys
 import json
 import logging
+import time
 
 # 添加模块路径
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -22,10 +23,13 @@ from modules.sys_diag import generate_text_report, generate_csv_report, generate
 from modules.ai_analyzer import get_analyzer
 from modules.net_monitor import configure_geo_risk
 from modules.audit import log_event
+from modules.process_tracker import tracker
 
 import platform as _platform
 
-if _platform.system() == 'Darwin':
+if _platform.system() == 'Windows':
+    _EDITION = 'Windows Edition'
+elif _platform.system() == 'Darwin':
     _EDITION = 'macOS Edition'
 else:
     _EDITION = 'Linux Edition'
@@ -261,6 +265,37 @@ def cmd_net(args):
         print(f'\n已保存CSV: {args.output}')
 
 
+def cmd_track(args):
+    """在限定时间内采样跟踪一个可疑进程。"""
+    try:
+        session = tracker.start(args.pid, duration=args.duration, interval=args.interval)
+    except Exception as exc:
+        print(f'[错误] 无法启动跟踪: {exc}')
+        return
+    print(f"正在跟踪 {session['process_name']} (PID {session['pid']})，任务 {session['id']} ...")
+    while True:
+        current = tracker.get(session['id'])
+        if current['status'] != 'running':
+            break
+        time.sleep(min(1.0, args.interval))
+    report = tracker.report(session['id'])
+    print(f"\n{report['summary']}")
+    for item in report['concerns']:
+        print(f'  - {item}')
+    print('建议：')
+    for item in report['recommended_actions']:
+        print(f'  - {item}')
+    if args.ai:
+        analyzer = get_analyzer()
+        if not analyzer.is_enabled():
+            print('[AI] AI分析未启用')
+        elif not args.yes and (not sys.stdin.isatty() or input('确认把最小化跟踪摘要发送给外部AI? [y/N] ').strip().lower() not in ('y', 'yes')):
+            print('[AI] 已取消外发')
+        else:
+            result = analyzer.analyze_tracking_report(report)
+            print(f"\n[AI跟踪报告]\n{result.get('analysis') or result.get('error')}")
+
+
 def cmd_diag(args):
     """系统全面诊断"""
     qqwry = find_qqwry_dat()
@@ -462,6 +497,14 @@ def main():
     p_trace.add_argument('--timeout', type=int, default=5, help='超时秒数(默认5)')
     p_trace.add_argument('--ai', action='store_true', help='AI分析路由安全')
 
+    # track
+    p_track = subparsers.add_parser('track', help='跟踪可疑进程的文件与网络活动')
+    p_track.add_argument('pid', type=int, help='要跟踪的进程 PID')
+    p_track.add_argument('--duration', type=int, default=60, help='跟踪秒数(5-3600，默认60)')
+    p_track.add_argument('--interval', type=float, default=2, help='采样间隔秒数(默认2)')
+    p_track.add_argument('--ai', action='store_true', help='用AI整理跟踪简报')
+    p_track.add_argument('--yes', action='store_true', help='跳过AI外发确认')
+
     # web
     p_web = subparsers.add_parser('web', help='启动Web监控服务')
     p_web.add_argument('--host', default=None, help='监听地址(默认读取 web_config.json，未配置则 127.0.0.1)')
@@ -504,6 +547,7 @@ def main():
         'net': cmd_net,
         'diag': cmd_diag,
         'trace': cmd_trace,
+        'track': cmd_track,
         'web': cmd_web,
         'update': cmd_update,
         'ai-config': cmd_ai_config,

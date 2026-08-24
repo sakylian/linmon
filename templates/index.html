@@ -604,10 +604,11 @@ async function loadOverview() {
   try {
     const res = await fetch(API + '/api/overview');
     const data = await res.json();
-    const s = data.system, ps = data.proc_summary, ns = data.net_summary;
-    document.getElementById('sysInfo').textContent = `${s.distro.name} | 开机: ${s.boot_time_str} | 运行: ${s.uptime}`;
+    const s = data.system, ps = data.proc_summary, ns = data.net_summary, health = data.health || {};
+    document.getElementById('sysInfo').textContent = `${s.distro.name} | 开机: ${s.boot_time_str} | 运行: ${s.uptime} | ${health.headline||''}`;
 
     const cards = [
+      {label:'系统健康', value:health.score==null?'—':health.score, sub:health.headline||'等待扫描', cls:health.level==='danger'?'danger':health.level==='attention'?'warning':'success'},
       {label:'进程总数', value:ps.total_processes, sub:`高危 ${ps.risky_count}`, cls: ps.risky_count>0?'danger':'success'},
       {label:'有网络连接', value:ps.has_network, sub:'个进程', cls:''},
       {label:'有定时配置', value:ps.has_schedule, sub:'个进程', cls:''},
@@ -674,7 +675,7 @@ function renderProcessTable(procs) {
       <td style="font-size:11px;color:#8b949e">${(p.net_conns_str||'').substring(0,30)}</td>
       <td style="font-size:11px">${hasSchedule?'<span class="badge medium">有</span>':'-'}</td>
       <td>${riskBadge}</td>
-      <td><button class="btn" style="padding:2px 8px;font-size:11px" onclick="event.stopPropagation();aiAnalyze('process',${p.pid})">AI</button><button class="btn kill" style="padding:2px 8px;font-size:11px;margin-left:4px" onclick="event.stopPropagation();copyKillCmd(${p.pid},'${(p.name||'').replace(/'/g,"\\'")}')" title="复制kill命令">kill</button></td>
+      <td><button class="btn" style="padding:2px 8px;font-size:11px" onclick="event.stopPropagation();trackProcess(${p.pid},'${(p.name||'').replace(/'/g,"\\'")}')">跟踪</button><button class="btn" style="padding:2px 8px;font-size:11px;margin-left:4px" onclick="event.stopPropagation();aiAnalyze('process',${p.pid})">AI</button><button class="btn kill" style="padding:2px 8px;font-size:11px;margin-left:4px" onclick="event.stopPropagation();copyKillCmd(${p.pid},'${(p.name||'').replace(/'/g,"\\'")}')" title="复制kill命令">kill</button></td>
     </tr>`;
     // 详情行
     html += `<tr class="detail-row" id="proc-${p.pid}"><td colspan="11"><div class="grid">
@@ -690,6 +691,8 @@ function renderProcessTable(procs) {
       <div><span class="k">使用端口:</span><span class="v">${p.net_ports_str}</span></div>
       <div><span class="k">网络连接:</span><span class="v">${p.net_conns_str}</span></div>
       <div><span class="k">风险原因:</span><span class="v">${p.risk_reasons_str||'无'}</span></div>
+      <div><span class="k">给初学者:</span><span class="v">${p.beginner_description||p.description||'无'}</span></div>
+      <div><span class="k">建议:</span><span class="v">${p.beginner_advice||'无'}</span></div>
     </div></td></tr>`;
   });
   html += '</tbody></table>';
@@ -710,6 +713,62 @@ function sortByProc(key) {
 function toggleDetail(id) {
   const el = document.getElementById(id);
   if (el) el.style.display = el.style.display === 'none' ? '' : 'none';
+}
+
+async function trackProcess(pid, name) {
+  const raw = prompt(`跟踪 ${name} (PID ${pid}) 多少秒？`, '60');
+  if (raw === null) return;
+  const duration = Number(raw);
+  if (!Number.isFinite(duration) || duration < 5 || duration > 3600) {
+    showToast('跟踪时长必须在 5 到 3600 秒之间'); return;
+  }
+  openModal();
+  document.getElementById('ai-modal-title').textContent = '可疑进程跟踪';
+  const body = document.getElementById('ai-modal-body');
+  body.innerHTML = `<div class="loading">正在跟踪 ${_esc(name)}，窗口可保持打开...</div>`;
+  try {
+    const res = await fetch(API + '/api/process-tracking', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({pid:pid,duration:duration,interval:2})
+    });
+    const started = await res.json();
+    if (!res.ok) throw new Error(started.error || '启动失败');
+    await pollProcessTracking(started.id, name, body);
+  } catch (e) { body.innerHTML = `<div class="ai-error">跟踪失败: ${_esc(String(e))}</div>`; }
+}
+
+async function pollProcessTracking(id, name, body) {
+  const res = await fetch(API + '/api/process-tracking/' + encodeURIComponent(id));
+  const status = await res.json();
+  if (!res.ok) { body.innerHTML = `<div class="ai-error">${_esc(status.error||'读取失败')}</div>`; return; }
+  if (status.status === 'running') {
+    body.innerHTML = `<div class="loading">正在跟踪 ${_esc(name)}：已采样 ${status.sample_count} 次，已运行 ${status.elapsed_seconds} 秒...</div>`;
+    setTimeout(() => pollProcessTracking(id, name, body), 1000); return;
+  }
+  const reportRes = await fetch(API + '/api/process-tracking/' + encodeURIComponent(id) + '/report', {
+    method:'POST', headers:{'Content-Type':'application/json'}, body:'{}'
+  });
+  const report = await reportRes.json();
+  const t = report.tracking || {};
+  const endpoints = ((t.network||{}).endpoints||[]).slice(0,20);
+  body.innerHTML = `<div class="ai-result"><h2>本地跟踪简报</h2><p>${_esc(report.summary||'')}</p>` +
+    `<h3>关注点</h3><ul>${(report.concerns||[]).map(x=>`<li>${_esc(x)}</li>`).join('')}</ul>` +
+    `<h3>网络对端与采样频次</h3><ul>${endpoints.length?endpoints.map(e=>`<li><code>${_esc(e.remote)}</code>：${e.observations} 次${e.public?'（公网）':''}</li>`).join(''):'<li>未观察到网络对端</li>'}</ul>` +
+    `<h3>建议</h3><ul>${(report.recommended_actions||[]).map(x=>`<li>${_esc(x)}</li>`).join('')}</ul>` +
+    `<p style="color:#8b949e">${_esc(((t.files||{}).measurement)||'')}</p></div>` +
+    `<div style="margin-top:12px"><button class="btn primary" onclick="aiTrackingReport('${id}')">用 AI 整理（需确认外发）</button></div>`;
+}
+
+async function aiTrackingReport(id) {
+  if (!confirm('将只发送聚合计数和公网对端，不发送本地文件路径。确认使用外部 AI？')) return;
+  const body = document.getElementById('ai-modal-body');
+  const res = await fetch(API + '/api/process-tracking/' + encodeURIComponent(id) + '/report', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({use_ai:true,confirm_external:true})
+  });
+  const data = await res.json();
+  const ai = data.ai_analysis || {};
+  body.innerHTML += `<div class="ai-result" style="margin-top:12px"><h2>AI 简报</h2>${ai.success?renderMarkdown(ai.analysis):`<div class="ai-error">${_esc(ai.error||data.error||'分析失败')}</div>`}</div>`;
 }
 
 // ====== 网络连接 ======
@@ -765,6 +824,7 @@ function renderConnectionTable(conns) {
       <div><span class="k">定时器:</span><span class="v">${c.timer_info||'无'}</span></div>
       <div><span class="k">经纬度:</span><span class="v">${c.geo.lng||'—'}, ${c.geo.lat||'—'}</span></div>
       <div><span class="k">风险原因:</span><span class="v">${c.risk_reasons_str||'无'}</span></div>
+      <div><span class="k">通俗说明:</span><span class="v">${c.beginner_description||'无'}</span></div>
       <div><span class="k">首次发现:</span><span class="v">${c.frequency?.first_seen||'—'}</span></div>
       <div><span class="k">最后发现:</span><span class="v">${c.frequency?.last_seen||'—'}</span></div>
     </div></td></tr>`;

@@ -26,9 +26,13 @@ from modules.geo_locator import find_qqwry_dat, GeoLocator, is_valid_public_ip
 from modules.distro_helper import get_distro
 from modules.ai_analyzer import get_analyzer
 from modules.audit import log_event
+from modules.health import build_health_report
+from modules.process_tracker import tracker
+from modules.runtime_identity import configure_monitor_identity
 
 # 是否运行在 macOS (Darwin)
 IS_MACOS = sys.platform == 'darwin'
+IS_WINDOWS = sys.platform == 'win32'
 
 logger = logging.getLogger(__name__)
 
@@ -164,6 +168,7 @@ _cached_data = {
     'boot_info': None,
     'proc_summary': None,
     'net_summary': None,
+    'health': None,
     'timestamp': 0,
 }
 _cache_ttl = 5  # 缓存有效期5秒
@@ -182,6 +187,7 @@ def _refresh_data(force=False):
         connections = get_all_connections(qqwry_path=qqwry)
         proc_summary = get_process_summary(processes)
         net_summary = get_network_summary(connections)
+        health = build_health_report(processes, connections, boot_info)
 
         _cached_data.update({
             'processes': processes,
@@ -189,13 +195,14 @@ def _refresh_data(force=False):
             'boot_info': boot_info,
             'proc_summary': proc_summary,
             'net_summary': net_summary,
+            'health': health,
             'timestamp': now,
         })
 
 
 @app.route('/')
 def index():
-    edition = 'macOS' if IS_MACOS else 'Linux'
+    edition = 'Windows' if IS_WINDOWS else ('macOS' if IS_MACOS else 'Linux')
     return render_template('index.html', edition=edition)
 
 
@@ -278,9 +285,56 @@ def api_overview():
         },
         'proc_summary': _cached_data['proc_summary'],
         'net_summary': _cached_data['net_summary'],
+        'health': _cached_data['health'],
         'timestamp': _cached_data['timestamp'],
         'server_time': time.strftime('%Y-%m-%d %H:%M:%S'),
     })
+
+
+@app.route('/api/process-tracking', methods=['GET', 'POST'])
+def api_process_tracking():
+    """创建或列出可疑进程跟踪任务。"""
+    if request.method == 'GET':
+        return jsonify({'sessions': tracker.list()})
+    data = request.get_json() or {}
+    try:
+        session = tracker.start(
+            int(data.get('pid', 0)),
+            duration=int(data.get('duration', 60)),
+            interval=float(data.get('interval', 2)),
+        )
+        log_event('process_tracking_start', f'pid={session["pid"]} id={session["id"]}')
+        return jsonify(session), 202
+    except (ValueError, TypeError) as exc:
+        return jsonify({'error': str(exc)}), 400
+    except Exception as exc:
+        return jsonify({'error': f'无法跟踪该进程: {exc}'}), 404
+
+
+@app.route('/api/process-tracking/<session_id>', methods=['GET', 'DELETE'])
+def api_process_tracking_session(session_id):
+    try:
+        if request.method == 'DELETE':
+            return jsonify(tracker.stop(session_id))
+        return jsonify(tracker.get(session_id))
+    except KeyError:
+        return jsonify({'error': '未找到跟踪任务'}), 404
+
+
+@app.route('/api/process-tracking/<session_id>/report', methods=['POST'])
+def api_process_tracking_report(session_id):
+    """生成本地简报；显式确认后可把最小化摘要交给 AI 整理。"""
+    try:
+        report = tracker.report(session_id)
+    except KeyError:
+        return jsonify({'error': '未找到跟踪任务'}), 404
+    data = request.get_json() or {}
+    if data.get('use_ai'):
+        if not data.get('confirm_external'):
+            return jsonify({'error': '使用外部AI前必须设置 confirm_external=true',
+                            'local_report': report}), 400
+        report['ai_analysis'] = get_analyzer().analyze_tracking_report(report)
+    return jsonify(report)
 
 
 @app.route('/api/traceroute', methods=['POST'])
@@ -496,6 +550,9 @@ def start_server(host=None, port=None, debug=False):
                 print('[错误] 无法找到可用端口')
                 return
     sock.close()
+
+    # 必须在自动端口选择结束后注册，确保只豁免实际由本监控服务拥有的端口。
+    configure_monitor_identity(pid=os.getpid(), ports=[port], name='linmon-web')
 
     token = _current_token()
     print(f'  实际监听端口: {port}')

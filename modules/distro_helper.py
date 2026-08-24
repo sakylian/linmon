@@ -13,8 +13,9 @@ import platform
 import shutil
 from pathlib import Path
 
-# 是否运行在 macOS (Darwin)
+# 平台标记
 IS_MACOS = sys.platform == 'darwin'
+IS_WINDOWS = sys.platform == 'win32'
 
 
 class DistroHelper:
@@ -39,6 +40,15 @@ class DistroHelper:
             'pkg_manager': '',        # apt / dnf / yum / pacman / zypper / brew
             'service_manager': 'systemd',  # systemd / sysvinit / openrc / launchd
         }
+
+        if IS_WINDOWS or platform.system().lower() == 'windows':
+            info.update({
+                'family': 'windows', 'id': 'windows',
+                'version': platform.version(), 'name': platform.platform(),
+                'pkg_manager': 'winget' if shutil.which('winget') else '',
+                'service_manager': 'scm',
+            })
+            return info
 
         # macOS 优先：无 /etc/os-release，用 sw_vers / sysctl
         if IS_MACOS or platform.system().lower() == 'darwin':
@@ -265,6 +275,11 @@ class DistroHelper:
 
     def get_scheduled_items(self):
         """统一获取定时/自启任务。Linux 返回 cron/systemd；macOS 返回 launchd。"""
+        if IS_WINDOWS or self.get_service_manager() == 'scm':
+            return {
+                'windows_tasks': [], 'launchd': [], 'cron_dirs': [],
+                'systemd_timers': [], 'rc_local': '', 'initd_scripts': [],
+            }
         if IS_MACOS or self.get_service_manager() == 'launchd':
             return {
                 'launchd': self.get_launchd_agents(),
@@ -330,6 +345,16 @@ class DistroHelper:
             'active': False,
             'rules': []
         }
+        if IS_WINDOWS:
+            result['type'] = 'windows_defender_firewall'
+            try:
+                r = subprocess.run(['netsh', 'advfirewall', 'show', 'allprofiles', 'state'],
+                                   capture_output=True, text=True, timeout=8)
+                result['active'] = r.returncode == 0 and 'ON' in r.stdout.upper()
+                result['rules'] = [ln.strip() for ln in r.stdout.splitlines() if ln.strip()]
+            except (FileNotFoundError, subprocess.TimeoutExpired):
+                pass
+            return result
         # macOS: 使用 pfctl / application firewall
         if IS_MACOS:
             # 应用层防火墙 (socketfilterfw)

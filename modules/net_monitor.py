@@ -35,8 +35,10 @@ from .proc_monitor import (
 
 logger = logging.getLogger(__name__)
 
-# 当前是否运行在 macOS (Darwin)
+# 非 Linux 平台使用 psutil 作为统一采集后端。
 IS_MACOS = sys.platform == 'darwin'
+IS_WINDOWS = sys.platform == 'win32'
+IS_LINUX = sys.platform.startswith('linux')
 
 # 地理高风险地区外连判定配置（由 webserver / CLI 注入，默认关闭以避免误报）
 _GEO_RISK = {'enabled': False, 'regions': []}
@@ -66,7 +68,7 @@ def start_frequency_sampler(interval=30):
 
 
 def _run_psutil_connections():
-    """macOS 下用 psutil 采集网络连接，返回与 ss 结构一致的连接列表。
+    """macOS/Windows 下用 psutil 采集网络连接，返回与 ss 一致的结构。
 
     macOS 非 root 下 psutil.net_connections() 会因个别进程 AccessDenied
     导致整批抛异常；改为逐进程 proc.connections() 采集，跳过拒绝访问的进程。
@@ -115,8 +117,8 @@ def _run_psutil_connections():
 
 def _run_ss_command():
     """运行 ss 命令获取更详细的连接信息（含 timer/process）"""
-    # macOS 无 ss，改用 psutil
-    if IS_MACOS:
+    # macOS / Windows 无 Linux ss，改用 psutil
+    if not IS_LINUX:
         return _run_psutil_connections()
 
     connections = []
@@ -254,7 +256,7 @@ def _get_conn_data_volume(inode):
 def _get_process_io_stats(pid):
     """获取进程IO统计"""
     # macOS 无 /proc，用 psutil.io_counters / memory 估算
-    if IS_MACOS:
+    if not IS_LINUX:
         if psutil is None or not pid:
             return {}
         try:
@@ -318,8 +320,12 @@ def _estimate_remote_os(remote_ip):
 
     try:
         # macOS 的 ping -W 单位是毫秒且语义不同，用 -t（超时秒）代替
-        cmd = ['ping', '-c', '1', '-t', '2', remote_ip] if IS_MACOS \
-            else ['ping', '-c', '1', '-W', '2', remote_ip]
+        if IS_WINDOWS:
+            cmd = ['ping', '-n', '1', '-w', '2000', remote_ip]
+        elif IS_MACOS:
+            cmd = ['ping', '-c', '1', '-t', '2', remote_ip]
+        else:
+            cmd = ['ping', '-c', '1', '-W', '2', remote_ip]
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
         if r.returncode == 0:
             # 提取 ttl=X (macOS 输出 ttl= / time=)
@@ -373,6 +379,10 @@ def _assess_connection_risk(conn_info):
     direction = conn_info.get('direction', 'unknown')
     process = conn_info.get('process', '')
     state = conn_info.get('state', '')
+
+    # 监控程序自身的监听端口由启动器显式注册，不参与风险规则。
+    if conn_info.get('is_monitor_owned'):
+        return 'low', []
 
     # LISTEN 状态只提示，不判高危（监听端口本身是服务行为，需结合进程判断）
     if direction == 'listen' or state == 'LISTEN':
@@ -534,7 +544,7 @@ def get_all_connections(qqwry_path=None, include_internal=False, detect_os=False
     # 同时解析 /proc/net/tcp 获取 kernel 级连接（仅 Linux）
     proc_conns = []
     inode_to_pid = {}
-    if not IS_MACOS:
+    if IS_LINUX:
         proc_conns = _parse_proc_net_tcp() + _parse_proc_net_tcp6()
 
         # 构建 inode → pid 映射
@@ -563,8 +573,8 @@ def get_all_connections(qqwry_path=None, include_internal=False, detect_os=False
             return pid_cache[pid]
         info = {'name': '', 'cmdline': '', 'user': ''}
         if pid:
-            if IS_MACOS and psutil is not None:
-                # macOS: 用 psutil 获取进程信息
+            if not IS_LINUX and psutil is not None:
+                # macOS / Windows: 用 psutil 获取进程信息
                 try:
                     p = psutil.Process(pid)
                     info['name'] = p.name() or ''
@@ -673,6 +683,17 @@ def get_all_connections(qqwry_path=None, include_internal=False, detect_os=False
             'is_private': is_private_ip(remote_ip),
         }
 
+        from .runtime_identity import is_monitor_listener, is_monitor_port, is_monitor_process
+        conn_info['is_monitor_owned'] = (
+            is_monitor_listener(pid, sc['local_port']) or
+            (direction == 'listen' and is_monitor_port(sc['local_port'])) or
+            (is_monitor_process(pid) and direction == 'listen')
+        )
+        conn_info['safety_note'] = (
+            '该端口由 linmon 监控程序自身运行，用于本地监控面板，属于安全的预期监听。'
+            if conn_info['is_monitor_owned'] else ''
+        )
+
         # 年龄格式化
         if age_seconds is not None:
             if age_seconds < 60:
@@ -689,6 +710,17 @@ def get_all_connections(qqwry_path=None, include_internal=False, detect_os=False
         conn_info['risk_level'] = risk_level
         conn_info['risk_reasons'] = risk_reasons
         conn_info['risk_reasons_str'] = '; '.join(risk_reasons)
+        conn_info['beginner_status'] = (
+            '监控程序自身（安全）' if conn_info['is_monitor_owned'] else
+            '需要立即确认' if risk_level == 'high' else
+            '建议核实' if risk_level == 'medium' else '正常或常见通信'
+        )
+        conn_info['beginner_description'] = (
+            conn_info['safety_note'] or
+            (f"{proc_name or '未知程序'} 正在监听本机端口 {sc['local_port']}。"
+             if direction == 'listen' else
+             f"{proc_name or '未知程序'} 与 {remote_ip}:{remote_port} 通信，方向为 {direction}。")
+        )
 
         # 合并去重: 活跃连接按 (remote_ip:remote_port + 进程 + 方向) 合并，LISTEN 不合并
         if direction != 'listen' and remote_port > 0:
@@ -764,7 +796,9 @@ def run_traceroute(target, max_hops=30, timeout=5):
 
     hops = []
     cmd = None
-    if sh.which('traceroute'):
+    if IS_WINDOWS and sh.which('tracert'):
+        cmd = ['tracert', '-d', '-h', str(max_hops), '-w', str(timeout * 1000), target]
+    elif sh.which('traceroute'):
         # macOS/BSD traceroute 默认每跳 3 次探测，-q 1 减为 1 次以大幅缩短耗时
         if IS_MACOS:
             cmd = ['traceroute', '-m', str(max_hops), '-w', str(timeout), '-q', '1', target]
@@ -776,11 +810,12 @@ def run_traceroute(target, max_hops=30, timeout=5):
         cmd = ['tracepath', target]
 
     if not cmd:
-        return {'error': '未找到 traceroute/mtr/tracepath 命令，请安装: sudo apt install traceroute 或 sudo yum install traceroute'}
+        needed = 'tracert' if IS_WINDOWS else 'traceroute/mtr/tracepath'
+        return {'error': f'未找到 {needed} 命令'}
 
     try:
         # macOS -q 1 后每跳最多 timeout 秒；Linux 仍为 3 次。取两者上限 + 缓冲
-        probes_per_hop = 1 if IS_MACOS else 3
+        probes_per_hop = 1 if (IS_MACOS or IS_WINDOWS) else 3
         total_timeout = max_hops * timeout * probes_per_hop + 10
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=total_timeout)
         output = r.stdout
@@ -877,8 +912,8 @@ def _pick_macos_iface():
 def _get_local_ip_addrs():
     """获取本机所有 IPv4 接口地址，用于判定抓包方向（发送/接收）"""
     ips = set()
-    # macOS: 用 psutil 或系统命令获取接口地址
-    if IS_MACOS:
+    # macOS / Windows: 用 psutil 获取接口地址
+    if not IS_LINUX:
         if psutil is not None:
             try:
                 for _, addrs in psutil.net_if_addrs().items():
@@ -888,6 +923,8 @@ def _get_local_ip_addrs():
                 return ips
             except (psutil.Error, OSError):
                 pass
+        if IS_WINDOWS:
+            return ips
         try:
             r = subprocess.run(['ifconfig'], capture_output=True, text=True, timeout=5)
             for m in re.finditer(r'inet\s+(\d{1,3}(?:\.\d{1,3}){3})', r.stdout):

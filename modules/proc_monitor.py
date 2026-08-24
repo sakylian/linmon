@@ -25,8 +25,10 @@ from .distro_helper import get_distro
 
 logger = logging.getLogger(__name__)
 
-# 当前是否运行在 macOS (Darwin) 上。macOS 没有 /proc、/sys、ss、systemd 等。
+# 平台标记。非 Linux 平台统一优先走 psutil，避免依赖 /proc。
 IS_MACOS = sys.platform == 'darwin'
+IS_WINDOWS = sys.platform == 'win32'
+IS_LINUX = sys.platform.startswith('linux')
 
 # Linux 常见进程知识库
 PROCESS_DB = {
@@ -118,6 +120,26 @@ PROCESS_DB = {
     'masscan': ('高速端口扫描(需关注)', 'security', 1),
     'hydra': ('密码爆破(高危)', 'security', 1),
     'john': ('密码破解(高危)', 'security', 1),
+    # macOS 常见核心进程
+    'launchd': ('macOS 服务与启动项管理器', 'system', 5),
+    'kernel_task': ('macOS 内核任务', 'kernel', 1),
+    'windowserver': ('macOS 图形界面服务', 'system', 5),
+    'finder': ('macOS 文件管理器', 'system', 5),
+    # Windows 常见核心进程
+    'system': ('Windows 系统内核进程', 'kernel', 1),
+    'registry': ('Windows 注册表内核进程', 'kernel', 1),
+    'smss.exe': ('Windows 会话管理器', 'system', 5),
+    'csrss.exe': ('Windows 客户端/服务器运行时', 'system', 5),
+    'wininit.exe': ('Windows 初始化进程', 'system', 5),
+    'services.exe': ('Windows 服务控制管理器', 'system', 5),
+    'lsass.exe': ('Windows 本地安全授权服务', 'security', 5),
+    'svchost.exe': ('Windows 系统服务宿主', 'system', 5),
+    'winlogon.exe': ('Windows 登录管理器', 'system', 5),
+    'explorer.exe': ('Windows 桌面与文件管理器', 'system', 5),
+    'dwm.exe': ('Windows 桌面窗口管理器', 'system', 5),
+    'msmpeng.exe': ('Microsoft Defender 防病毒服务', 'security', 5),
+    'powershell.exe': ('Windows PowerShell 命令环境', 'shell', 1),
+    'cmd.exe': ('Windows 命令提示符', 'shell', 1),
 }
 
 
@@ -370,6 +392,7 @@ def _psutil_conn_to_proc(conn):
 
 # macOS 上 psutil 网络连接缓存: {pid: [conn_dict, ...]}，仅在 macOS 使用
 _PSUTIL_CONN_CACHE = None
+_PSUTIL_CONN_CACHE_TIME = 0
 
 
 def _get_psutil_connections_cached():
@@ -378,8 +401,8 @@ def _get_psutil_connections_cached():
     macOS 非 root 下 psutil.net_connections() 会因个别进程 AccessDenied
     导致整批抛异常；改为逐进程 proc.connections() 采集，跳过拒绝访问的进程。
     """
-    global _PSUTIL_CONN_CACHE
-    if _PSUTIL_CONN_CACHE is not None:
+    global _PSUTIL_CONN_CACHE, _PSUTIL_CONN_CACHE_TIME
+    if _PSUTIL_CONN_CACHE is not None and time.time() - _PSUTIL_CONN_CACHE_TIME < 2:
         return _PSUTIL_CONN_CACHE
     cache = defaultdict(list)
     if psutil is not None:
@@ -390,19 +413,21 @@ def _get_psutil_connections_cached():
             except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
                 continue
     _PSUTIL_CONN_CACHE = dict(cache)
+    _PSUTIL_CONN_CACHE_TIME = time.time()
     return _PSUTIL_CONN_CACHE
 
 
 def _reset_psutil_conn_cache():
     """清理 psutil 连接缓存（测试用）。"""
-    global _PSUTIL_CONN_CACHE
+    global _PSUTIL_CONN_CACHE, _PSUTIL_CONN_CACHE_TIME
     _PSUTIL_CONN_CACHE = None
+    _PSUTIL_CONN_CACHE_TIME = 0
 
 
 def _get_process_network_connections(pid):
     """获取指定进程的网络连接"""
-    # macOS: 使用 psutil 网络连接（无 /proc、/sys）
-    if IS_MACOS:
+    # macOS / Windows: 使用 psutil 网络连接（无 Linux /proc）
+    if not IS_LINUX:
         conn_map = _get_psutil_connections_cached()
         proc_conns = conn_map.get(pid, [])
         ports = set()
@@ -487,6 +512,15 @@ def _detect_scheduled_tasks(proc_name, proc_cmdline, distro):
         'details': '无定时/自启配置',
     }
 
+    proc_lower = (proc_name or '').lower()
+    cmd_lower = (proc_cmdline or '').lower()
+
+    # Windows 的任务计划由系统级适配器统一处理；逐进程扫描时避免反复执行
+    # schtasks，先明确标注当前基础扫描未关联到具体任务。
+    if IS_WINDOWS or distro.get_service_manager() == 'scm':
+        sched_info['details'] = 'Windows 任务计划关联暂未扫描'
+        return sched_info
+
     # macOS: 检测 launchd 自启项
     if IS_MACOS or distro.get_service_manager() == 'launchd':
         try:
@@ -518,9 +552,6 @@ def _detect_scheduled_tasks(proc_name, proc_cmdline, distro):
         return sched_info
 
     # 1. 检查 crontab
-
-    proc_lower = proc_name.lower()
-    cmd_lower = (proc_cmdline or '').lower()
 
     # 1. 检查 crontab
     cron_dirs = distro.get_cron_dirs()
@@ -783,7 +814,7 @@ def _detect_high_risk(proc_info):
         risk_reasons.append('可执行文件已被删除但仍运行中（典型入侵残留）')
 
     # 隐藏或无路径 (排除内核线程和已知系统服务用户)
-    if not exe_path and proc_info.get('pid', 0) > 1:
+    if not exe_path and proc_info.get('pid', 0) > 1 and not IS_WINDOWS:
         # 再次排除内核线程
         if not _is_kernel_thread(proc_info):
             # 一些系统服务进程可能因权限不足无法读取exe
@@ -813,7 +844,7 @@ def _detect_high_risk(proc_info):
                 elif username and username != 'root':
                     # 非 root 进程：其 exe 在非特权下本应可读，不可读即可疑
                     risk_reasons.append('进程可执行文件路径不可读（可能已隐藏）')
-                elif os.geteuid() == 0:
+                elif getattr(os, 'geteuid', lambda: -1)() == 0:
                     # root 进程：仅当扫描器本身也是 root 时才可疑；
                     # 否则多为权限不足导致的误报，不应标记
                     risk_reasons.append('root进程可执行文件路径不可读（可能已删除或隐藏）')
@@ -851,9 +882,11 @@ def get_all_processes(boot_time=None, scan_schedules=True, scan_network=True):
 
     # 第一遍：收集所有进程基本信息
     raw_procs = {}
-    for proc in psutil.process_iter(['pid', 'ppid', 'name', 'exe', 'cmdline',
-                                      'create_time', 'username', 'memory_info',
-                                      'cpu_percent', 'status', 'uids']):
+    attrs = ['pid', 'ppid', 'name', 'exe', 'cmdline', 'create_time', 'username',
+             'memory_info', 'cpu_percent', 'status']
+    if not IS_WINDOWS:
+        attrs.append('uids')
+    for proc in psutil.process_iter(attrs):
         try:
             info = proc.info
             pid = info['pid']
@@ -868,7 +901,7 @@ def get_all_processes(boot_time=None, scan_schedules=True, scan_network=True):
                 'memory_rss': info['memory_info'].rss if info['memory_info'] else 0,
                 'cpu_percent': info['cpu_percent'] or 0,
                 'status': info['status'] or 'unknown',
-                'uid': info['uids'].real if info['uids'] else 0,
+                'uid': info.get('uids').real if info.get('uids') else None,
             }
         except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
             continue
@@ -978,6 +1011,13 @@ def get_all_processes(boot_time=None, scan_schedules=True, scan_network=True):
             'conn_summary': conn_summary,
         }
 
+        from .runtime_identity import is_monitor_process
+        proc_detail['is_monitor_owned'] = is_monitor_process(pid)
+        proc_detail['safety_note'] = (
+            '这是 linmon 监控程序自身的进程；它为本地监控面板提供服务，属于预期行为。'
+            if proc_detail['is_monitor_owned'] else ''
+        )
+
         # 运行时长格式化
         uptime = proc_detail['uptime']
         if uptime < 60:
@@ -995,6 +1035,28 @@ def get_all_processes(boot_time=None, scan_schedules=True, scan_network=True):
         proc_detail['risk_level'] = risk_level
         proc_detail['risk_reasons'] = risk_reasons
         proc_detail['risk_reasons_str'] = '; '.join(risk_reasons) if risk_reasons else ''
+
+        if proc_detail['is_monitor_owned']:
+            proc_detail['is_risky'] = False
+            proc_detail['risk_level'] = 'low'
+            proc_detail['risk_reasons'] = []
+            proc_detail['risk_reasons_str'] = ''
+
+        # 面向电脑初学者的稳定字段，Web/CLI 无需自行解释底层术语。
+        proc_detail['beginner_status'] = (
+            '需要立即确认' if proc_detail['risk_level'] == 'high' else
+            '建议核实' if proc_detail['risk_level'] == 'medium' else '正常或已知行为'
+        )
+        proc_detail['beginner_description'] = (
+            proc_detail['safety_note'] or
+            f"{proc_detail['description']}。由用户 {proc_detail['username']} 启动，"
+            f"当前已运行 {proc_detail['uptime_str']}。"
+        )
+        proc_detail['beginner_advice'] = (
+            '这是监控程序自身，无需处理。' if proc_detail['is_monitor_owned'] else
+            '先跟踪该进程，再决定是否停止或删除。' if proc_detail['is_risky'] else
+            '无需操作；如果你不认识它，可核对安装来源和可执行文件路径。'
+        )
 
         processes.append(proc_detail)
 
@@ -1025,7 +1087,7 @@ def get_system_boot_info():
 
     # 从 /proc/uptime 获取更精确的uptime（仅 Linux）
     proc_uptime = uptime
-    if not IS_MACOS:
+    if IS_LINUX:
         try:
             with open('/proc/uptime', 'r') as f:
                 proc_uptime = float(f.read().split()[0])
@@ -1034,7 +1096,7 @@ def get_system_boot_info():
 
     # 从 who -b 获取启动时间（macOS 的 who 不支持 -b，跳过）
     who_boot = ''
-    if not IS_MACOS:
+    if IS_LINUX:
         try:
             r = subprocess.run(['who', '-b'], capture_output=True, text=True, timeout=5)
             if r.returncode == 0 and r.stdout.strip():
@@ -1044,7 +1106,7 @@ def get_system_boot_info():
 
     # systemd 启动时间（仅 Linux）
     systemd_boot = ''
-    if not IS_MACOS:
+    if IS_LINUX:
         try:
             r = subprocess.run(['systemd-analyze'], capture_output=True, text=True, timeout=5)
             if r.returncode == 0:
